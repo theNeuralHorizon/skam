@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: anomaly-detector
+  namespace: skam-platform
+  labels:
+    app: anomaly-detector
+    tier: platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: anomaly-detector
+  template:
+    metadata:
+      labels:
+        app: anomaly-detector
+        tier: platform
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8091"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+        - name: anomaly-detector
+          image: localhost:5111/skam/anomaly-detector:latest
+          ports:
+            - containerPort: 8091
+              name: http
+          env:
+            - name: PROMETHEUS_URL
+              value: "http://prometheus-kube-prometheus-prometheus.monitoring:9090"
+            - name: DECISION_ENGINE_URL
+              value: "http://decision-engine:8090"
+            - name: DETECTION_INTERVAL_SECONDS
+              value: "15"
+            - name: LOG_LEVEL
+              value: "20"
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 15
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: anomaly-detector
+  namespace: skam-platform
+  labels:
+    app: anomaly-detector
+spec:
+  type: NodePort
+  selector:
+    app: anomaly-detector
+  ports:
+    - port: 8091
+      targetPort: 8091
+      nodePort: 30091
+      name: http
