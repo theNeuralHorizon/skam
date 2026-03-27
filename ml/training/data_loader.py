@@ -31,13 +31,17 @@ import pandas as pd
 
 
 # ── Feature mapping ──────────────────────────────────────────────────────────
-# RCAEval column suffixes  →  our canonical feature names
-FEATURE_MAP: dict[str, str] = {
-    "_cpu": "cpu_usage",
-    "_mem": "memory_usage",
-    "_load": "request_rate",
-    "_latency": "latency",
-    "_error": "error_rate",
+# RCAEval columns use varying suffixes across dataset versions:
+#   RE1 (per-scenario CSVs): _workload, _latency (p90), _latency-50, _latency-90
+#   Multi-source sample:     _workload, _latency-50, _latency-90
+#
+# We try multiple suffix variants in priority order.
+FEATURE_MAP: dict[str, list[str]] = {
+    "cpu_usage":     ["_cpu"],
+    "memory_usage":  ["_mem"],
+    "request_rate":  ["_load", "_workload"],
+    "latency":       ["_latency", "_latency-90", "_latency-50"],
+    "error_rate":    ["_error"],
 }
 
 # Canonical feature ordering (must match anomaly detector)
@@ -165,22 +169,28 @@ def extract_service_features(
 ) -> pd.DataFrame | None:
     """Extract the 5-feature vector for *service* from a raw RCAEval DataFrame.
 
-    Returns a DataFrame with columns matching ``FEATURE_ORDER``, or ``None``
-    if the service's columns are not present.
+    Tries multiple column suffix variants (e.g. ``_load`` then ``_workload``)
+    for each canonical feature.  Returns a DataFrame with columns matching
+    ``FEATURE_ORDER``, or ``None`` if required columns are not present.
     """
     features: dict[str, pd.Series] = {}
-    missing = []
+    missing: list[str] = []
 
-    for suffix, canonical in FEATURE_MAP.items():
-        col = f"{service}{suffix}"
-        if col in df.columns:
-            features[canonical] = df[col]
-        else:
-            # Some services lack error columns — fill with zeros
+    for canonical, suffixes in FEATURE_MAP.items():
+        found = False
+        for suffix in suffixes:
+            col = f"{service}{suffix}"
+            if col in df.columns:
+                features[canonical] = df[col]
+                found = True
+                break
+
+        if not found:
+            # error_rate is optional — many services lack it
             if canonical == "error_rate":
                 features[canonical] = pd.Series(0.0, index=df.index)
             else:
-                missing.append(col)
+                missing.append(f"{service}{suffixes[0]}")
 
     if missing:
         return None

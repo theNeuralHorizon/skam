@@ -2,18 +2,18 @@
   "dataset": "C:\\Users\\kshit\\OneDrive\\Desktop\\skam\\ml\\data\\rcaeval\\online-boutique",
   "interval_seconds": 15,
   "isolation_forest": {
-    "training_samples": 7000,
-    "training_time_s": 0.32,
+    "training_samples": 8800,
+    "training_time_s": 0.21,
     "self_check_anomaly_pct": 5.0,
-    "score_mean": -0.48341685196249506,
-    "score_std": 0.03997050735111576
+    "score_mean": -0.4738581059776208,
+    "score_std": 0.044286645951440946
   },
   "lstm_autoencoder": {
-    "training_samples": 6050,
-    "training_time_s": 33.26,
-    "best_train_loss": 0.00011,
-    "threshold": 0.000132,
-    "separation_ratio": 39458.17,
+    "training_samples": 6425,
+    "training_time_s": 35.82,
+    "best_train_loss": 8.5e-05,
+    "threshold": 0.000604,
+    "separation_ratio": 34865.04,
     "total_params": 27045
   },
   "feature_order": [

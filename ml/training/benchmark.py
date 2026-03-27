@@ -500,11 +500,41 @@ def main() -> None:
         print("Run: python ml/training/train_models.py to download the dataset first")
         sys.exit(1)
 
-    print("Loading RCAEval data...")
-    X_normal, X_anomalous, labels = build_training_arrays(
-        data_dir, fault_types=args.fault_types, interval_seconds=15,
-    )
-    print(f"  Normal: {len(X_normal):,}  Anomalous: {len(X_anomalous):,}")
+    print("Loading RCAEval data (balanced across fault types)...")
+
+    # Load per-fault-type and balance to avoid bias from trivially-separable
+    # faults (cpu/mem) dominating the evaluation.
+    available_faults = args.fault_types or ["cpu", "mem", "delay", "disk", "loss"]
+    per_fault_normal: list[np.ndarray] = []
+    per_fault_anomalous: list[np.ndarray] = []
+    rng = np.random.default_rng(42)
+
+    min_samples = float("inf")
+    for ft in available_faults:
+        try:
+            xn, xa, _ = build_training_arrays(data_dir, fault_types=[ft], interval_seconds=15)
+            min_samples = min(min_samples, len(xn), len(xa))
+        except ValueError:
+            continue
+
+    min_samples = int(min_samples)
+    print(f"  Balancing to {min_samples} samples per fault type")
+
+    for ft in available_faults:
+        try:
+            xn, xa, _ = build_training_arrays(data_dir, fault_types=[ft], interval_seconds=15)
+        except ValueError:
+            print(f"  [SKIP] No data for fault type: {ft}")
+            continue
+        idx_n = rng.choice(len(xn), min(min_samples, len(xn)), replace=False)
+        idx_a = rng.choice(len(xa), min(min_samples, len(xa)), replace=False)
+        per_fault_normal.append(xn[idx_n])
+        per_fault_anomalous.append(xa[idx_a])
+        print(f"  {ft}: {len(idx_n)} normal + {len(idx_a)} anomalous")
+
+    X_normal = np.vstack(per_fault_normal)
+    X_anomalous = np.vstack(per_fault_anomalous)
+    print(f"  Total: {len(X_normal):,} normal, {len(X_anomalous):,} anomalous")
 
     results = run_benchmark(X_normal, X_anomalous, ensemble_names=args.ensembles)
     print_leaderboard(results)
