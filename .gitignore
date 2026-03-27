@@ -13,10 +13,11 @@ vendor/
 node_modules/
 dashboard/dist/
 
-# ML models
-ml/models/*.pt
-ml/models/*.pkl
-ml/data/*.csv
+# ML raw data (large downloads, not committed)
+ml/data/
+
+# ML models - allow pre-trained weights (small, needed for startup)
+# Re-add specific ignores for large experiment artefacts if needed
 
 # IDE
 .vscode/
