@@ -45,10 +45,10 @@ class _Encoder(nn.Module):
 
 
 class _Decoder(nn.Module):
-    def __init__(self, hidden_size: int, output_size: int, num_layers: int) -> None:
+    def __init__(self, input_size: int, hidden_size: int, output_size: int, num_layers: int) -> None:
         super().__init__()
         self.lstm = nn.LSTM(
-            input_size=hidden_size,
+            input_size=input_size,
             hidden_size=hidden_size,
             num_layers=num_layers,
             batch_first=True,
@@ -57,17 +57,23 @@ class _Decoder(nn.Module):
 
     def forward(
         self,
-        seq_len: int,
+        x: torch.Tensor,
         hidden: tuple[torch.Tensor, torch.Tensor],
     ) -> torch.Tensor:
-        # Repeat the last hidden output across the time dimension
-        batch_size = hidden[0].size(1)
-        decoder_input = hidden[0][-1].unsqueeze(1).repeat(1, seq_len, 1)  # (B, T, H)
-        output, _ = self.lstm(decoder_input, hidden)
+        output, _ = self.lstm(x, hidden)
         return self.fc(output)  # (B, T, output_size)
 
 
 class LSTMAutoencoder(nn.Module):
+    """LSTM Autoencoder matching the training script's architecture.
+
+    Encoder: LSTM(input_size → hidden_size)
+    Decoder: LSTM(input_size → hidden_size) + Linear(hidden_size → input_size)
+
+    Both encoder and decoder receive the original input sequence.  The
+    decoder is initialised with the encoder's final hidden state.
+    """
+
     def __init__(
         self,
         input_size: int = _NUM_FEATURES,
@@ -76,11 +82,11 @@ class LSTMAutoencoder(nn.Module):
     ) -> None:
         super().__init__()
         self.encoder = _Encoder(input_size, hidden_size, num_layers)
-        self.decoder = _Decoder(hidden_size, input_size, num_layers)
+        self.decoder = _Decoder(input_size, hidden_size, input_size, num_layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         hidden = self.encoder(x)
-        return self.decoder(x.size(1), hidden)
+        return self.decoder(x, hidden)
 
 
 # ---------------------------------------------------------------------------
