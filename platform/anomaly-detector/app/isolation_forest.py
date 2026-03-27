@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import threading
+from pathlib import Path
 
 import numpy as np
 import structlog
@@ -24,6 +26,10 @@ class IsolationForestDetector:
     anomalous.  The detector maintains a running Z-score normaliser and
     automatically retrains when its internal buffer exceeds
     ``_RETRAIN_THRESHOLD`` samples.
+
+    If a pre-trained model path is provided (via ``pretrained_path`` or the
+    ``IF_MODEL_PATH`` environment variable), the detector starts in a trained
+    state immediately — no cold-start delay.
     """
 
     def __init__(
@@ -31,12 +37,14 @@ class IsolationForestDetector:
         contamination: float = 0.05,
         n_estimators: int = 100,
         random_state: int = 42,
+        pretrained_path: str | None = None,
     ) -> None:
         self._contamination = contamination
         self._n_estimators = n_estimators
         self._random_state = random_state
 
         self._model: IsolationForest | None = None
+        self._scaler = None  # RobustScaler from pre-trained artefact
         self._trained = False
         self._lock = threading.Lock()
 
@@ -47,6 +55,11 @@ class IsolationForestDetector:
 
         # Buffer for (re-)training
         self._buffer: list[np.ndarray] = []
+
+        # Attempt to load pre-trained model
+        model_path = pretrained_path or os.getenv("IF_MODEL_PATH")
+        if model_path and Path(model_path).exists():
+            self._load_pretrained(model_path)
 
     # -- public API ----------------------------------------------------------
 
@@ -125,6 +138,37 @@ class IsolationForestDetector:
         score = 1.0 / (1.0 + np.exp(5.0 * raw_score))
         return float(np.clip(score, 0.0, 1.0))
 
+    # -- pre-trained model loading -------------------------------------------
+
+    def _load_pretrained(self, path: str) -> None:
+        """Load a pre-trained IsolationForest + scaler from a joblib pickle."""
+        try:
+            import joblib
+
+            artefact = joblib.load(path)
+            self._model = artefact["model"]
+            self._scaler = artefact.get("scaler")
+            self._trained = True
+
+            training_samples = artefact.get("training_samples", 0)
+            model_training_samples.labels(detector="isolation_forest").set(
+                training_samples,
+            )
+
+            logger.info(
+                "isolation_forest.pretrained_loaded",
+                path=path,
+                training_samples=training_samples,
+                contamination=artefact.get("contamination"),
+                n_estimators=artefact.get("n_estimators"),
+            )
+        except Exception as exc:
+            logger.error(
+                "isolation_forest.pretrained_load_failed",
+                path=path,
+                error=str(exc),
+            )
+
     # -- internals -----------------------------------------------------------
 
     def _update_running_stats(self, x: np.ndarray) -> None:
@@ -145,5 +189,13 @@ class IsolationForestDetector:
         return std
 
     def _normalise(self, data: np.ndarray) -> np.ndarray:
-        """Z-score normalisation using the running mean and std."""
+        """Normalise features for model input.
+
+        Uses the RobustScaler from pre-trained artefact when available,
+        otherwise falls back to running Z-score normalisation.
+        """
+        if self._scaler is not None:
+            return self._scaler.transform(
+                data.reshape(-1, _NUM_FEATURES),
+            ).reshape(data.shape)
         return (data - self._mean) / self._running_std()

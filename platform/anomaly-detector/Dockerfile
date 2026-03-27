@@ -10,7 +10,12 @@ RUN apt-get update && \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+COPY app/ ./app/
+
+# Copy pre-trained model weights into the image.
+# The Makefile `copy-models` target populates this directory from ml/models/
+# before building the Docker image.
+COPY models/ /app/models/
 
 EXPOSE 8091
 

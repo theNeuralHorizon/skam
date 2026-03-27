@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import threading
 from collections import deque
+from pathlib import Path
 
 import numpy as np
 import structlog
@@ -91,9 +93,17 @@ class LSTMDetector:
     Maintains a sliding window of ``_WINDOW_SIZE`` time-steps for each
     service.  The reconstruction error (MSE) is normalised to ``[0, 1]``
     using an exponential moving average of the historical maximum error.
+
+    If a pre-trained checkpoint is provided (via ``pretrained_path`` or
+    the ``LSTM_MODEL_PATH`` environment variable), the model loads
+    immediately with calibrated normalisation and threshold — no cold start.
     """
 
-    def __init__(self, device: str | None = None) -> None:
+    def __init__(
+        self,
+        device: str | None = None,
+        pretrained_path: str | None = None,
+    ) -> None:
         self._device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self._model = LSTMAutoencoder().to(self._device)
         self._trained = False
@@ -106,12 +116,20 @@ class LSTMDetector:
         self._ema_max_error: float = 1.0
         self._ema_alpha: float = 0.05
 
+        # Calibrated threshold from training (if pre-trained)
+        self._pretrained_threshold: float | None = None
+
         # Buffer of completed sequences for training
         self._train_buffer: list[np.ndarray] = []
 
         # Feature normalisation (simple min-max from training data)
         self._feat_min: np.ndarray | None = None
         self._feat_max: np.ndarray | None = None
+
+        # Attempt to load pre-trained checkpoint
+        model_path = pretrained_path or os.getenv("LSTM_MODEL_PATH")
+        if model_path and Path(model_path).exists():
+            self._load_pretrained(model_path)
 
     # -- public API ----------------------------------------------------------
 
@@ -221,7 +239,77 @@ class LSTMDetector:
         seq = np.stack(list(self._windows[service]))
         return self.predict(seq)
 
+    def _load_pretrained(self, path: str) -> None:
+        """Load a full training checkpoint with model weights + normalisation."""
+        try:
+            checkpoint = torch.load(path, map_location=self._device, weights_only=False)
+
+            # The training script saves a different architecture — check keys
+            state_dict = checkpoint.get("model_state_dict", checkpoint)
+
+            # Remap keys if the training script used a different model layout
+            # Training: encoder(LSTM) + decoder(LSTM) + output_layer(Linear)
+            # Runtime: encoder._Encoder(LSTM) + decoder._Decoder(LSTM + fc)
+            remapped = self._remap_state_dict(state_dict)
+            self._model.load_state_dict(remapped, strict=False)
+
+            # Load normalisation parameters
+            if "feat_min" in checkpoint:
+                self._feat_min = np.array(checkpoint["feat_min"], dtype=np.float32)
+            if "feat_max" in checkpoint:
+                self._feat_max = np.array(checkpoint["feat_max"], dtype=np.float32)
+            if "threshold" in checkpoint:
+                self._pretrained_threshold = float(checkpoint["threshold"])
+                self._ema_max_error = self._pretrained_threshold * 5.0
+
+            self._trained = True
+
+            training_samples = checkpoint.get("training_samples", 0)
+            model_training_samples.labels(detector="lstm").set(training_samples)
+
+            logger.info(
+                "lstm_detector.pretrained_loaded",
+                path=path,
+                training_samples=training_samples,
+                threshold=self._pretrained_threshold,
+                epochs=checkpoint.get("epochs"),
+                best_loss=checkpoint.get("best_loss"),
+            )
+        except Exception as exc:
+            logger.error(
+                "lstm_detector.pretrained_load_failed",
+                path=path,
+                error=str(exc),
+            )
+
+    @staticmethod
+    def _remap_state_dict(state_dict: dict) -> dict:
+        """Remap keys from the training script's model to the runtime model.
+
+        Training script uses:
+            encoder.weight_ih_l0, encoder.weight_hh_l0, ...
+            decoder.weight_ih_l0, decoder.weight_hh_l0, ...
+            output_layer.weight, output_layer.bias
+
+        Runtime model uses:
+            encoder.lstm.weight_ih_l0, ...
+            decoder.lstm.weight_ih_l0, ...
+            decoder.fc.weight, decoder.fc.bias
+        """
+        remapped: dict = {}
+        for key, value in state_dict.items():
+            new_key = key
+            if key.startswith("encoder.") and not key.startswith("encoder.lstm."):
+                new_key = key.replace("encoder.", "encoder.lstm.", 1)
+            elif key.startswith("decoder.") and not key.startswith("decoder.lstm.") and not key.startswith("decoder.fc."):
+                new_key = key.replace("decoder.", "decoder.lstm.", 1)
+            elif key.startswith("output_layer."):
+                new_key = key.replace("output_layer.", "decoder.fc.", 1)
+            remapped[new_key] = value
+        return remapped
+
     def load_weights(self, path: str) -> None:
+        """Load raw state dict (legacy method — prefer _load_pretrained)."""
         state = torch.load(path, map_location=self._device, weights_only=True)
         self._model.load_state_dict(state)
         self._trained = True

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from collections import defaultdict, deque
 from datetime import datetime, timezone
@@ -38,13 +39,24 @@ class AnomalyDetector:
     Stage 1: Isolation Forest for point anomalies (per-sample).
     Stage 2: LSTM Autoencoder for temporal anomalies (sliding window).
 
-    The first ``_COLD_START_SAMPLES`` per service are assumed to represent
-    normal behaviour and are used exclusively for training.
+    When pre-trained model paths are provided, the detector starts
+    immediately with zero cold-start delay.  Otherwise it falls back
+    to the original behaviour of collecting ``_COLD_START_SAMPLES``
+    per service before scoring.
     """
 
-    def __init__(self) -> None:
-        self._if_detector = IsolationForestDetector()
-        self._lstm_detector = LSTMDetector()
+    def __init__(
+        self,
+        if_model_path: str | None = None,
+        lstm_model_path: str | None = None,
+    ) -> None:
+        # Resolve paths: explicit args > env vars > None
+        if_path = if_model_path or os.getenv("IF_MODEL_PATH")
+        lstm_path = lstm_model_path or os.getenv("LSTM_MODEL_PATH")
+
+        self._if_detector = IsolationForestDetector(pretrained_path=if_path)
+        self._lstm_detector = LSTMDetector(pretrained_path=lstm_path)
+        self._pretrained = self._if_detector.is_trained
 
         # Per-service sample counts for cold-start handling
         self._sample_counts: dict[str, int] = defaultdict(int)
@@ -113,12 +125,13 @@ class AnomalyDetector:
         self._sample_counts[service] += 1
         count = self._sample_counts[service]
 
-        # Always feed data into both detectors
+        # Always feed data into both detectors (for running stats and retraining)
         self._if_detector.add_sample(features)
         self._lstm_detector.push(service, features.astype(np.float32))
 
         # --- cold start: train only, no scoring ---
-        if count <= _COLD_START_SAMPLES:
+        # Skip cold start entirely when pre-trained models are loaded
+        if not self._pretrained and count <= _COLD_START_SAMPLES:
             if count == _COLD_START_SAMPLES:
                 logger.info("detector.cold_start_complete", service=service, samples=count)
                 self._if_detector.train()
