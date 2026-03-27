@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-service
+  labels:
+    app: order-service
+    tier: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: order-service
+  template:
+    metadata:
+      labels:
+        app: order-service
+        tier: backend
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8083"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+        - name: order-service
+          image: localhost:5111/skam/order-service:latest
+          ports:
+            - containerPort: 8083
+              name: http
+          env:
+            - name: PORT
+              value: "8083"
+            - name: DATABASE_URL
+              value: "postgres://skam:skam-secret@postgres:5432/orderdb?sslmode=disable"
+            - name: REDIS_URL
+              value: "redis:6379"
+            - name: PAYMENT_SERVICE_URL
+              value: "http://payment-service:8084"
+            - name: NOTIFICATION_SERVICE_URL
+              value: "http://notification-service:8085"
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "300m"
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-service
+  labels:
+    app: order-service
+spec:
+  selector:
+    app: order-service
+  ports:
+    - port: 8083
+      targetPort: 8083
+      name: http
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: order-service-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: order-service
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
