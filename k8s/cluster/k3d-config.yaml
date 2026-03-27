@@ -1,0 +1,36 @@
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: skam-chaos
+servers: 1
+agents: 2
+kubeAPI:
+  hostIP: "127.0.0.1"
+  hostPort: "6443"
+ports:
+  - port: 8080:80
+    nodeFilters:
+      - loadbalancer
+  - port: 8443:443
+    nodeFilters:
+      - loadbalancer
+  - port: 30000-30100:30000-30100
+    nodeFilters:
+      - servers:0
+registries:
+  create:
+    name: skam-registry
+    host: "0.0.0.0"
+    hostPort: "5111"
+options:
+  k3d:
+    wait: true
+    timeout: "120s"
+  k3s:
+    extraArgs:
+      - arg: "--disable=traefik"
+        nodeFilters:
+          - servers:*
+  kubeconfig:
+    updateDefaultKubeconfig: true
+    switchCurrentContext: true
