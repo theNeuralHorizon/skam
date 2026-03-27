@@ -29,11 +29,23 @@ build-services:
 		docker build -t $(REGISTRY)/skam/$$svc:latest services/$$svc/; \
 	done
 
-build-platform:
+build-platform: copy-models
 	@for svc in $(PLATFORM_SERVICES); do \
 		echo "Building $$svc..."; \
 		docker build -t $(REGISTRY)/skam/$$svc:latest platform/$$svc/; \
 	done
+
+# Copy pre-trained model weights into anomaly-detector build context
+copy-models:
+	@mkdir -p platform/anomaly-detector/models
+	@if [ -f ml/models/isolation_forest.pkl ]; then \
+		cp ml/models/isolation_forest.pkl platform/anomaly-detector/models/; \
+		cp ml/models/lstm_autoencoder.pt platform/anomaly-detector/models/; \
+		cp ml/models/training_stats.json platform/anomaly-detector/models/; \
+		echo "Pre-trained models copied to anomaly-detector build context"; \
+	else \
+		echo "WARNING: No pre-trained models found in ml/models/. Run 'python ml/training/train_models.py' first."; \
+	fi
 
 # ── Push Images to Local Registry ────────────────────────────
 push-images:

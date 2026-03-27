@@ -36,6 +36,10 @@ spec:
               value: "15"
             - name: LOG_LEVEL
               value: "20"
+            - name: IF_MODEL_PATH
+              value: "/app/models/isolation_forest.pkl"
+            - name: LSTM_MODEL_PATH
+              value: "/app/models/lstm_autoencoder.pt"
           resources:
             requests:
               memory: "256Mi"
