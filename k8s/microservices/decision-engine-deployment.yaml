@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: decision-engine
+  namespace: skam-platform
+  labels:
+    app: decision-engine
+    component: platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: decision-engine
+  template:
+    metadata:
+      labels:
+        app: decision-engine
+        component: platform
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8092"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: skam-platform-sa
+      containers:
+        - name: decision-engine
+          image: skam-platform/decision-engine:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8092
+              name: http
+          env:
+            - name: PROMETHEUS_URL
+              value: "http://prometheus-server.monitoring:9090"
+            - name: ANOMALY_DETECTOR_URL
+              value: "http://anomaly-detector.skam-platform:8091"
+            - name: NAMESPACE
+              value: "skam-platform"
+            - name: LOG_FORMAT
+              value: "json"
+            - name: HEALTH_CHECK_INTERVAL
+              value: "30"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8092
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8092
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: decision-engine
+  namespace: skam-platform
+  labels:
+    app: decision-engine
+spec:
+  type: NodePort
+  selector:
+    app: decision-engine
+  ports:
+    - port: 8092
+      targetPort: 8092
+      nodePort: 30092
+      protocol: TCP
+      name: http
