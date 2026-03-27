@@ -1,0 +1,35 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+
+# Go
+vendor/
+
+# Node
+node_modules/
+dashboard/dist/
+
+# ML models
+ml/models/*.pt
+ml/models/*.pkl
+ml/data/*.csv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# K8s
+*.kubeconfig
+
+# Env
+.env
+.env.local
