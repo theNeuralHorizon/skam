@@ -49,18 +49,10 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Protocol
 
 import numpy as np
-from sklearn.metrics import (
-    auc,
-    average_precision_score,
-    f1_score,
-    precision_recall_curve,
-    precision_score,
-    recall_score,
-    roc_auc_score,
-)
+from sklearn.metrics import roc_auc_score
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
@@ -72,6 +64,7 @@ from ml.training.data_loader import (
     extract_service_features,
     downsample_to_interval,
 )
+from ml.training.metrics import ExtendedMetrics, compute_extended_metrics
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -303,6 +296,172 @@ class CombinedIFLSTMEnsemble:
         return float(np.clip(combined, 0, 1))
 
 
+@register_ensemble
+class XGBoostLSTMEnsemble:
+    """XGBoost for feature-based anomalies + LSTM for temporal patterns.
+
+    XGBoost is trained as a cross-prediction regressor on normal data:
+    each feature is predicted from the remaining four.  At inference the
+    normalised mean absolute prediction error serves as an anomaly signal,
+    combined 50/50 with a Mahalanobis-like LSTM proxy (same approach as
+    CombinedIFLSTMEnsemble).
+    """
+
+    name = "xgboost_lstm"
+    cold_start_samples = 100
+
+    def __init__(self) -> None:
+        import xgboost as xgb
+        from sklearn.preprocessing import RobustScaler
+
+        self._scaler = RobustScaler()
+        self._xgb_models: list = []  # one regressor per feature
+        self._n_features: int = 0
+        self._feat_mean: np.ndarray | None = None
+        self._feat_std: np.ndarray | None = None
+        self._train_errors: np.ndarray | None = None
+        self._xgb = xgb
+
+    def fit(self, X_normal: np.ndarray) -> None:
+        X_scaled = self._scaler.fit_transform(X_normal)
+        self._n_features = X_scaled.shape[1]
+        self._xgb_models = []
+
+        # Cross-prediction: predict feature i from all other features
+        for i in range(self._n_features):
+            mask = [j for j in range(self._n_features) if j != i]
+            model = self._xgb.XGBRegressor(
+                n_estimators=100,
+                max_depth=4,
+                learning_rate=0.1,
+                subsample=0.8,
+                random_state=42,
+                verbosity=0,
+            )
+            model.fit(X_scaled[:, mask], X_scaled[:, i])
+            self._xgb_models.append(model)
+
+        # Store training error distribution for normalisation
+        errors = self._cross_prediction_error(X_scaled)
+        self._train_errors = errors
+        self._feat_mean = X_normal.mean(axis=0)
+        self._feat_std = X_normal.std(axis=0)
+        self._feat_std[self._feat_std < 1e-8] = 1.0
+
+    def _cross_prediction_error(self, X_scaled: np.ndarray) -> np.ndarray:
+        """Mean absolute cross-prediction error per sample."""
+        total_err = np.zeros(len(X_scaled))
+        for i, model in enumerate(self._xgb_models):
+            mask = [j for j in range(self._n_features) if j != i]
+            pred = model.predict(X_scaled[:, mask])
+            total_err += np.abs(X_scaled[:, i] - pred)
+        return total_err / self._n_features
+
+    def score(self, features: np.ndarray) -> float:
+        x = self._scaler.transform(features.reshape(1, -1))
+        error = float(self._cross_prediction_error(x)[0])
+
+        # Percentile-rank against training errors
+        if self._train_errors is not None:
+            pct = (self._train_errors < error).mean()
+            xgb_score = float(np.clip(pct, 0, 1))
+        else:
+            xgb_score = float(np.clip(error / 5.0, 0, 1))
+
+        # LSTM temporal proxy (Mahalanobis-like, same as CombinedIFLSTMEnsemble)
+        z = np.abs((features - self._feat_mean) / self._feat_std)
+        lstm_proxy = float(np.clip(z.mean() / 5.0, 0, 1))
+
+        return float(np.clip(0.5 * xgb_score + 0.5 * lstm_proxy, 0, 1))
+
+
+@register_ensemble
+class XGBoostAttentionEnsemble:
+    """XGBoost with learned feature attention weights.
+
+    Instead of DistilBERT (which requires text input), we use a
+    single-head self-attention mechanism on the 5-feature vectors to
+    learn which features matter most for anomaly detection.  The
+    attention weights are derived from the training data covariance
+    structure, then applied to weight the XGBoost cross-prediction
+    errors per feature.
+    """
+
+    name = "xgboost_attention"
+    cold_start_samples = 50
+
+    def __init__(self) -> None:
+        import xgboost as xgb
+        from sklearn.preprocessing import RobustScaler
+
+        self._scaler = RobustScaler()
+        self._xgb_models: list = []
+        self._n_features: int = 0
+        self._attention_weights: np.ndarray | None = None
+        self._train_errors: np.ndarray | None = None
+        self._xgb = xgb
+
+    def fit(self, X_normal: np.ndarray) -> None:
+        X_scaled = self._scaler.fit_transform(X_normal)
+        self._n_features = X_scaled.shape[1]
+        self._xgb_models = []
+
+        # Cross-prediction regressors (same as XGBoostLSTMEnsemble)
+        for i in range(self._n_features):
+            mask = [j for j in range(self._n_features) if j != i]
+            model = self._xgb.XGBRegressor(
+                n_estimators=80,
+                max_depth=3,
+                learning_rate=0.1,
+                subsample=0.8,
+                random_state=42,
+                verbosity=0,
+            )
+            model.fit(X_scaled[:, mask], X_scaled[:, i])
+            self._xgb_models.append(model)
+
+        # Learn attention weights via single-head self-attention on
+        # the covariance matrix of the training features.
+        # Q = K = V = X_scaled — attention = softmax(Q K^T / sqrt(d))
+        # We reduce to per-feature importance by averaging attention
+        # rows and then taking the column-wise mean.
+        d = self._n_features
+        cov = np.cov(X_scaled, rowvar=False)  # (d, d)
+        # Scaled dot-product attention analogue
+        attn_logits = cov / np.sqrt(d)
+        # Softmax per row
+        exp_logits = np.exp(attn_logits - attn_logits.max(axis=1, keepdims=True))
+        attn = exp_logits / exp_logits.sum(axis=1, keepdims=True)
+        # Per-feature importance = column mean of attention matrix
+        self._attention_weights = attn.mean(axis=0)
+        # Normalise so weights sum to 1
+        self._attention_weights /= self._attention_weights.sum()
+
+        # Store training errors for percentile mapping
+        self._train_errors = self._weighted_error(X_scaled)
+
+    def _weighted_error(self, X_scaled: np.ndarray) -> np.ndarray:
+        """Attention-weighted mean absolute cross-prediction error."""
+        per_feat = np.zeros((len(X_scaled), self._n_features))
+        for i, model in enumerate(self._xgb_models):
+            mask = [j for j in range(self._n_features) if j != i]
+            pred = model.predict(X_scaled[:, mask])
+            per_feat[:, i] = np.abs(X_scaled[:, i] - pred)
+
+        # Weight by attention
+        return (per_feat * self._attention_weights).sum(axis=1)
+
+    def score(self, features: np.ndarray) -> float:
+        x = self._scaler.transform(features.reshape(1, -1))
+        error = float(self._weighted_error(x)[0])
+
+        # Percentile-rank against training errors
+        if self._train_errors is not None:
+            pct = (self._train_errors < error).mean()
+            return float(np.clip(pct, 0, 1))
+        return float(np.clip(error / 5.0, 0, 1))
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Benchmark runner
 # ═══════════════════════════════════════════════════════════════════════
@@ -310,33 +469,56 @@ class CombinedIFLSTMEnsemble:
 
 @dataclass
 class BenchmarkResult:
+    """Full benchmark result for one ensemble, including extended metrics."""
+
     ensemble_name: str
-    auc_roc: float = 0.0
-    auc_pr: float = 0.0
-    f1_best: float = 0.0
-    best_threshold: float = 0.0
-    precision_at_07: float = 0.0
-    recall_at_07: float = 0.0
-    fpr_at_07: float = 0.0
-    cold_start_samples: int = 0
-    throughput_scores_per_sec: float = 0.0
-    training_time_s: float = 0.0
+    metrics: ExtendedMetrics = field(default_factory=ExtendedMetrics)
+
+    # Convenience accessors for the most common metrics
+    @property
+    def auc_roc(self) -> float:
+        return self.metrics.auc_roc
+
+    @property
+    def auc_pr(self) -> float:
+        return self.metrics.auc_pr
+
+    @property
+    def f1_best(self) -> float:
+        return self.metrics.f1_best
+
+    def to_dict(self) -> dict:
+        """Serialise to JSON-compatible dict."""
+        d = self.metrics.to_dict()
+        d["ensemble_name"] = self.ensemble_name
+        return d
 
 
 def run_benchmark(
     X_normal: np.ndarray,
     X_anomalous: np.ndarray,
     ensemble_names: list[str] | None = None,
+    per_fault_data: dict[str, tuple[np.ndarray, np.ndarray]] | None = None,
 ) -> list[BenchmarkResult]:
     """Run all registered ensembles on the provided data.
 
-    Training: 70% of normal data (only normal — unsupervised)
+    Training: 70% of normal data (only normal -- unsupervised)
     Testing: balanced 50/50 split of held-out normal and anomalous data
 
     Using a balanced test set avoids inflating AUC-PR from prevalence
     bias (e.g. 77% anomalous would give a random baseline of 0.77).
+
+    Parameters
+    ----------
+    X_normal, X_anomalous : np.ndarray
+        Feature matrices for normal and anomalous data.
+    ensemble_names : list[str] | None
+        Subset of ensembles to evaluate (default: all registered).
+    per_fault_data : dict[str, tuple[np.ndarray, np.ndarray]] | None
+        Mapping from fault type name to (X_normal, X_anomalous) arrays.
+        Used to compute per-fault AUC-ROC breakdown.
     """
-    results = []
+    results: list[BenchmarkResult] = []
     targets = ensemble_names or list(_REGISTRY.keys())
 
     rng = np.random.default_rng(42)
@@ -388,80 +570,86 @@ def run_benchmark(
         score_time = time.time() - t0
         throughput = len(X_test) / max(score_time, 1e-6)
 
-        # Compute metrics
-        try:
-            auroc = roc_auc_score(y_true, scores)
-        except ValueError:
-            auroc = 0.0
+        # Compute extended metrics
+        m = compute_extended_metrics(y_true, scores, threshold=0.7)
+        m.cold_start_samples = ensemble.cold_start_samples
+        m.throughput_scores_per_sec = round(throughput, 0)
+        m.training_time_s = round(train_time, 3)
 
-        try:
-            auprc = average_precision_score(y_true, scores)
-        except ValueError:
-            auprc = 0.0
+        # Per-fault-type AUC-ROC breakdown
+        if per_fault_data is not None:
+            fault_aucs: dict[str, float] = {}
+            for ft, (xn_ft, xa_ft) in per_fault_data.items():
+                # Score a small balanced sample per fault type
+                ft_rng = np.random.default_rng(42)
+                ft_size = min(200, len(xn_ft), len(xa_ft))
+                if ft_size < 10:
+                    continue
+                xn_sub = xn_ft[ft_rng.choice(len(xn_ft), ft_size, replace=False)]
+                xa_sub = xa_ft[ft_rng.choice(len(xa_ft), ft_size, replace=False)]
+                ft_X = np.vstack([xn_sub, xa_sub])
+                ft_y = np.concatenate([np.zeros(ft_size), np.ones(ft_size)])
+                ft_scores = np.array([ensemble.score(x) for x in ft_X])
+                try:
+                    fault_aucs[ft] = round(float(roc_auc_score(ft_y, ft_scores)), 4)
+                except ValueError:
+                    fault_aucs[ft] = 0.0
+            m.auc_roc_per_fault = fault_aucs
 
-        # Find best F1 threshold
-        precisions, recalls, thresholds = precision_recall_curve(y_true, scores)
-        f1s = 2 * precisions * recalls / np.maximum(precisions + recalls, 1e-8)
-        best_idx = np.argmax(f1s)
-        best_f1 = float(f1s[best_idx])
-        best_thresh = float(thresholds[best_idx]) if best_idx < len(thresholds) else 0.5
-
-        # Metrics at threshold 0.7
-        preds_07 = (scores >= 0.7).astype(int)
-        p07 = precision_score(y_true, preds_07, zero_division=0)
-        r07 = recall_score(y_true, preds_07, zero_division=0)
-        # FPR: false positives / (false positives + true negatives)
-        fp = ((preds_07 == 1) & (y_true == 0)).sum()
-        tn = ((preds_07 == 0) & (y_true == 0)).sum()
-        fpr07 = fp / max(fp + tn, 1)
-
-        result = BenchmarkResult(
-            ensemble_name=name,
-            auc_roc=round(auroc, 4),
-            auc_pr=round(auprc, 4),
-            f1_best=round(best_f1, 4),
-            best_threshold=round(best_thresh, 4),
-            precision_at_07=round(p07, 4),
-            recall_at_07=round(r07, 4),
-            fpr_at_07=round(fpr07, 4),
-            cold_start_samples=ensemble.cold_start_samples,
-            throughput_scores_per_sec=round(throughput, 0),
-            training_time_s=round(train_time, 3),
-        )
+        result = BenchmarkResult(ensemble_name=name, metrics=m)
         results.append(result)
 
-        print(f"    AUC-ROC={auroc:.4f}  AUC-PR={auprc:.4f}  "
-              f"F1={best_f1:.4f}@{best_thresh:.3f}  "
-              f"P@0.7={p07:.3f}  R@0.7={r07:.3f}  "
-              f"FPR@0.7={fpr07:.3f}  "
-              f"throughput={throughput:.0f}/s")
+        print(f"    AUC-ROC={m.auc_roc:.4f}  AUC-PR={m.auc_pr:.4f}  "
+              f"F1={m.f1_best:.4f}@{m.best_threshold:.3f}  "
+              f"P@0.7={m.precision_at_07:.3f}  R@0.7={m.recall_at_07:.3f}  "
+              f"FPR@0.7={m.fpr_at_07:.3f}  "
+              f"MCC={m.mcc:.3f}  Brier={m.brier_score:.4f}  "
+              f"throughput={m.throughput_scores_per_sec:.0f}/s")
+        if m.auc_roc_per_fault:
+            parts = "  ".join(f"{ft}={v:.3f}" for ft, v in m.auc_roc_per_fault.items())
+            print(f"    Per-fault AUC-ROC: {parts}")
 
     return results
 
 
 def print_leaderboard(results: list[BenchmarkResult]) -> None:
-    """Print a sorted comparison table."""
+    """Print a sorted comparison table with extended metrics."""
     ranked = sorted(results, key=lambda r: r.auc_roc, reverse=True)
 
-    print(f"\n{'='*100}")
+    print(f"\n{'='*130}")
     print(f"  LEADERBOARD (ranked by AUC-ROC)")
-    print(f"{'='*100}")
+    print(f"{'='*130}")
     header = (
         f"  {'Rank':<5} {'Ensemble':<22} {'AUC-ROC':>8} {'AUC-PR':>8} "
-        f"{'F1@best':>8} {'P@0.7':>7} {'R@0.7':>7} {'FPR@0.7':>8} "
+        f"{'F1@best':>8} {'MCC':>6} {'Kappa':>6} {'Brier':>7} "
+        f"{'P@0.7':>7} {'R@0.7':>7} {'FPR@0.7':>8} "
         f"{'Cold':>6} {'Speed':>10} {'Train':>7}"
     )
     print(header)
     print(f"  {'-'*len(header.strip())}")
 
     for i, r in enumerate(ranked, 1):
+        m = r.metrics
         print(
-            f"  {i:<5} {r.ensemble_name:<22} {r.auc_roc:>8.4f} {r.auc_pr:>8.4f} "
-            f"{r.f1_best:>8.4f} {r.precision_at_07:>7.3f} {r.recall_at_07:>7.3f} "
-            f"{r.fpr_at_07:>8.3f} {r.cold_start_samples:>6} "
-            f"{r.throughput_scores_per_sec:>8.0f}/s {r.training_time_s:>6.2f}s"
+            f"  {i:<5} {r.ensemble_name:<22} {m.auc_roc:>8.4f} {m.auc_pr:>8.4f} "
+            f"{m.f1_best:>8.4f} {m.mcc:>6.3f} {m.cohens_kappa:>6.3f} {m.brier_score:>7.4f} "
+            f"{m.precision_at_07:>7.3f} {m.recall_at_07:>7.3f} "
+            f"{m.fpr_at_07:>8.3f} {m.cold_start_samples:>6} "
+            f"{m.throughput_scores_per_sec:>8.0f}/s {m.training_time_s:>6.2f}s"
         )
-    print(f"{'='*100}")
+
+    # Score quality sub-table
+    print(f"\n  {'--- Score Quality ---':^60}")
+    print(f"  {'Ensemble':<22} {'Separation':>11} {'Overlap%':>9} {'NormStd':>8} {'AnoStd':>8} {'FAR%':>7} {'Miss%':>7}")
+    for r in ranked:
+        m = r.metrics
+        print(
+            f"  {r.ensemble_name:<22} {m.score_separation:>11.4f} {m.score_overlap_pct:>8.1f}% "
+            f"{m.normal_score_std:>8.4f} {m.anomaly_score_std:>8.4f} "
+            f"{m.false_alarm_rate:>6.1f}% {m.miss_rate:>6.1f}%"
+        )
+
+    print(f"{'='*130}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -496,6 +684,7 @@ def main() -> None:
     available_faults = args.fault_types or ["cpu", "mem", "delay", "disk", "loss"]
     per_fault_normal: list[np.ndarray] = []
     per_fault_anomalous: list[np.ndarray] = []
+    loaded_faults: list[str] = []
     rng = np.random.default_rng(42)
 
     min_samples = float("inf")
@@ -519,22 +708,29 @@ def main() -> None:
         idx_a = rng.choice(len(xa), min(min_samples, len(xa)), replace=False)
         per_fault_normal.append(xn[idx_n])
         per_fault_anomalous.append(xa[idx_a])
+        loaded_faults.append(ft)
         print(f"  {ft}: {len(idx_n)} normal + {len(idx_a)} anomalous")
 
     X_normal = np.vstack(per_fault_normal)
     X_anomalous = np.vstack(per_fault_anomalous)
     print(f"  Total: {len(X_normal):,} normal, {len(X_anomalous):,} anomalous")
 
-    results = run_benchmark(X_normal, X_anomalous, ensemble_names=args.ensembles)
+    # Build per-fault data dict for per-fault AUC-ROC breakdown
+    per_fault_dict: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    for ft, xn, xa in zip(loaded_faults, per_fault_normal, per_fault_anomalous):
+        per_fault_dict[ft] = (xn, xa)
+
+    results = run_benchmark(
+        X_normal, X_anomalous,
+        ensemble_names=args.ensembles,
+        per_fault_data=per_fault_dict,
+    )
     print_leaderboard(results)
 
-    # Save results
+    # Save extended results
     output_path = output_dir / "benchmark_results.json"
     with open(output_path, "w") as f:
-        json.dump(
-            [vars(r) for r in results],
-            f, indent=2,
-        )
+        json.dump([r.to_dict() for r in results], f, indent=2)
     print(f"\nResults saved to {output_path}")
 
 
