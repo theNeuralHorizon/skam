@@ -30,6 +30,15 @@ class ServiceMetrics(BaseModel):
         ]
 
 
+class FeatureContributionDetail(BaseModel):
+    """Serialised feature contribution from the severity classifier."""
+
+    feature: str
+    z_score: float = 0.0
+    contribution_pct: float = 0.0
+    direction: str = "high"
+
+
 class AnomalyResult(BaseModel):
     """Result of anomaly detection for a single service at one point in time."""
 
@@ -44,6 +53,31 @@ class AnomalyResult(BaseModel):
         description='Category: "latency", "error_rate", "resource", or "availability"',
     )
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+
+    # Severity classification fields
+    severity_label: str = Field(
+        default="normal",
+        description='Severity level: "normal", "low", "medium", "high", "critical"',
+    )
+    severity_level: int = Field(
+        default=0,
+        ge=0,
+        le=4,
+        description="Numeric severity: 0=normal, 1=low, 2=medium, 3=high, 4=critical",
+    )
+    consecutive_anomaly_windows: int = Field(
+        default=0,
+        ge=0,
+        description="Number of consecutive detection windows with anomalous scores",
+    )
+    score_velocity: float = Field(
+        default=0.0,
+        description="Rate of score change per second (positive = worsening)",
+    )
+    top_contributors: list[FeatureContributionDetail] = Field(
+        default_factory=list,
+        description="Features driving the anomaly, ordered by contribution",
+    )
 
 
 class DetectorStatus(BaseModel):

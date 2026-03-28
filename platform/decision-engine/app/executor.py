@@ -1,9 +1,16 @@
-"""Recovery action executor — performs Kubernetes operations to heal services."""
+"""Recovery action executor -- performs Kubernetes operations to heal services.
+
+Supports urgency-based execution (CRITICAL actions skip the queue),
+post-action validation with severity-specific timeouts, and healing
+speed metrics (time from anomaly detection to recovery confirmation).
+"""
 
 from __future__ import annotations
 
 import asyncio
 import os
+import time
+from collections import deque
 from datetime import datetime, timezone
 from typing import Any
 
@@ -15,9 +22,69 @@ logger = structlog.get_logger(__name__)
 
 NAMESPACE = os.getenv("NAMESPACE", "skam-platform")
 
+# Severity level constants (mirror anomaly-detector Severity IntEnum)
+_SEV_CRITICAL = 4
+_SEV_HIGH = 3
+
+# Validation timeouts per severity level (seconds)
+_VALIDATION_TIMEOUTS: dict[int, float] = {
+    0: 120.0,  # NORMAL
+    1: 120.0,  # LOW
+    2: 90.0,   # MEDIUM
+    3: 60.0,   # HIGH
+    4: 30.0,   # CRITICAL
+}
+
+
+class HealingSpeedRecord:
+    """Tracks the time from anomaly detection to confirmed recovery."""
+
+    __slots__ = ("service", "action_id", "severity_level", "detection_ts",
+                 "action_started_ts", "recovery_confirmed_ts", "healing_duration_s")
+
+    def __init__(
+        self,
+        service: str,
+        action_id: str,
+        severity_level: int,
+        detection_ts: float,
+    ) -> None:
+        self.service = service
+        self.action_id = action_id
+        self.severity_level = severity_level
+        self.detection_ts = detection_ts
+        self.action_started_ts: float = 0.0
+        self.recovery_confirmed_ts: float = 0.0
+        self.healing_duration_s: float = 0.0
+
+    def mark_started(self) -> None:
+        self.action_started_ts = time.time()
+
+    def mark_recovered(self) -> None:
+        self.recovery_confirmed_ts = time.time()
+        self.healing_duration_s = self.recovery_confirmed_ts - self.detection_ts
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "service": self.service,
+            "action_id": self.action_id,
+            "severity_level": self.severity_level,
+            "detection_ts": self.detection_ts,
+            "action_started_ts": self.action_started_ts,
+            "recovery_confirmed_ts": self.recovery_confirmed_ts,
+            "healing_duration_s": round(self.healing_duration_s, 3),
+        }
+
 
 class RecoveryExecutor:
-    """Executes recovery actions against the Kubernetes API."""
+    """Executes recovery actions against the Kubernetes API.
+
+    Features:
+    - Urgency-based execution: CRITICAL actions bypass the normal queue
+      and execute immediately via ``execute_urgent``.
+    - Post-action validation with severity-specific timeouts.
+    - Healing speed metric tracking (detection -> recovery confirmation).
+    """
 
     def __init__(self) -> None:
         self._k8s_available = False
@@ -47,18 +114,44 @@ class RecoveryExecutor:
             self.autoscaling_v1 = None
             self.networking_v1 = None
 
+        # Healing speed tracking (last 200 records)
+        self._healing_records: deque[HealingSpeedRecord] = deque(maxlen=200)
+
     # ------------------------------------------------------------------
     # Public dispatch
     # ------------------------------------------------------------------
 
     async def execute(
-        self, action_type: str, service: str, parameters: dict[str, Any]
+        self,
+        action_type: str,
+        service: str,
+        parameters: dict[str, Any],
+        severity_level: int = 0,
+        detection_ts: float = 0.0,
+        action_id: str = "",
     ) -> dict[str, Any]:
         """Dispatch to the appropriate recovery method.
 
         Returns a dict with at least ``{"success": bool, "message": str}``.
+
+        Args:
+            action_type: The recovery action to perform.
+            service: Target Kubernetes service name.
+            parameters: Action-specific parameters.
+            severity_level: Numeric severity (0-4) for validation timeout selection.
+            detection_ts: Epoch timestamp when the anomaly was first detected.
+            action_id: Unique identifier for the recovery action.
         """
         namespace = parameters.pop("namespace", NAMESPACE)
+
+        # Start healing speed tracking
+        record = HealingSpeedRecord(
+            service=service,
+            action_id=action_id,
+            severity_level=severity_level,
+            detection_ts=detection_ts or time.time(),
+        )
+        record.mark_started()
 
         dispatch = {
             "restart_pod": self.restart_pod,
@@ -76,7 +169,7 @@ class RecoveryExecutor:
             return {"success": False, "message": msg}
 
         try:
-            return await handler(service=service, namespace=namespace, **parameters)
+            result = await handler(service=service, namespace=namespace, **parameters)
         except Exception as exc:
             logger.exception(
                 "executor_error",
@@ -85,6 +178,161 @@ class RecoveryExecutor:
                 error=str(exc),
             )
             return {"success": False, "message": f"Executor error: {exc}"}
+
+        # Post-action validation
+        if result.get("success"):
+            validation_timeout = _VALIDATION_TIMEOUTS.get(severity_level, 120.0)
+            validation = await self._validate_recovery(
+                service=service,
+                namespace=namespace,
+                timeout_s=validation_timeout,
+                severity_level=severity_level,
+            )
+            result["validation"] = validation
+
+            if validation.get("recovered"):
+                record.mark_recovered()
+                self._healing_records.append(record)
+                result["healing_duration_s"] = record.healing_duration_s
+                logger.info(
+                    "healing_speed_recorded",
+                    service=service,
+                    action_id=action_id,
+                    severity_level=severity_level,
+                    healing_duration_s=record.healing_duration_s,
+                )
+
+        return result
+
+    async def execute_urgent(
+        self,
+        action_type: str,
+        service: str,
+        parameters: dict[str, Any],
+        detection_ts: float = 0.0,
+        action_id: str = "",
+    ) -> dict[str, Any]:
+        """Execute a CRITICAL-severity action immediately, bypassing any queue.
+
+        This is a fast-path for CRITICAL alerts that should not wait behind
+        lower-priority actions in the execution pipeline.
+        """
+        logger.warning(
+            "urgent_execution_started",
+            action_type=action_type,
+            service=service,
+            action_id=action_id,
+        )
+        return await self.execute(
+            action_type=action_type,
+            service=service,
+            parameters=parameters,
+            severity_level=_SEV_CRITICAL,
+            detection_ts=detection_ts,
+            action_id=action_id,
+        )
+
+    # ------------------------------------------------------------------
+    # Healing speed metrics
+    # ------------------------------------------------------------------
+
+    def get_healing_records(self, service: str | None = None) -> list[dict[str, Any]]:
+        """Return recent healing speed records, optionally filtered by service."""
+        records = self._healing_records
+        if service:
+            records = [r for r in records if r.service == service]
+        return [r.to_dict() for r in records]
+
+    def average_healing_time(self, service: str | None = None) -> float:
+        """Return the average healing duration in seconds across recent records."""
+        records = self._healing_records
+        if service:
+            records = [r for r in records if r.service == service]
+        if not records:
+            return 0.0
+        return sum(r.healing_duration_s for r in records) / len(records)
+
+    # ------------------------------------------------------------------
+    # Post-action validation
+    # ------------------------------------------------------------------
+
+    async def _validate_recovery(
+        self,
+        service: str,
+        namespace: str,
+        timeout_s: float,
+        severity_level: int,
+    ) -> dict[str, Any]:
+        """Validate that the service recovered after the action.
+
+        Checks that all pods are Running and Ready within the severity-specific
+        timeout window.  Returns a dict with validation outcome.
+        """
+        log = logger.bind(
+            action="validate_recovery",
+            service=service,
+            timeout_s=timeout_s,
+            severity_level=severity_level,
+        )
+
+        if not self._k8s_available:
+            log.info("dry_run_validation")
+            return {
+                "recovered": True,
+                "message": f"[dry-run] Assumed recovery for {service}",
+                "timeout_s": timeout_s,
+            }
+
+        start = time.time()
+        poll_interval = min(5.0, timeout_s / 4)
+        attempts = 0
+
+        while (time.time() - start) < timeout_s:
+            attempts += 1
+            try:
+                pods = await asyncio.to_thread(
+                    self.core_v1.list_namespaced_pod,
+                    namespace=namespace,
+                    label_selector=f"app={service}",
+                )
+
+                if pods.items:
+                    all_ready = True
+                    for p in pods.items:
+                        if p.status.phase != "Running":
+                            all_ready = False
+                            break
+                        for cs in (p.status.container_statuses or []):
+                            if cs and not cs.ready:
+                                all_ready = False
+                                break
+
+                    if all_ready:
+                        elapsed = time.time() - start
+                        log.info(
+                            "recovery_validated",
+                            elapsed_s=round(elapsed, 2),
+                            attempts=attempts,
+                        )
+                        return {
+                            "recovered": True,
+                            "message": f"All pods for {service} are Running and Ready",
+                            "elapsed_s": round(elapsed, 2),
+                            "attempts": attempts,
+                        }
+            except ApiException as exc:
+                log.warning("validation_api_error", error=str(exc))
+
+            await asyncio.sleep(poll_interval)
+
+        elapsed = time.time() - start
+        log.warning("recovery_validation_timeout", elapsed_s=round(elapsed, 2))
+        return {
+            "recovered": False,
+            "message": f"Recovery not confirmed for {service} within {timeout_s}s",
+            "elapsed_s": round(elapsed, 2),
+            "attempts": attempts,
+        }
 
     # ------------------------------------------------------------------
     # Recovery actions

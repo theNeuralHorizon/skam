@@ -13,7 +13,8 @@ import structlog
 from app.isolation_forest import IsolationForestDetector
 from app.lstm_detector import LSTMDetector
 from app.metrics import anomaly_detected_total, anomaly_score
-from app.models import AnomalyResult, ServiceMetrics
+from app.models import AnomalyResult, FeatureContributionDetail, ServiceMetrics
+from app.severity import SeverityClassifier
 
 logger = structlog.get_logger(__name__)
 
@@ -71,6 +72,11 @@ class AnomalyDetector:
         self._anomaly_count: int = 0
         self._last_detection: datetime | None = None
         self._model_version: str = "1.0.0"
+
+        # Severity classifier for anomaly severity assessment
+        self._severity_classifier = SeverityClassifier(
+            anomaly_threshold=_ANOMALY_THRESHOLD,
+        )
 
     # -- public API ----------------------------------------------------------
 
@@ -168,6 +174,17 @@ class AnomalyDetector:
             anomaly_type = self._classify_anomaly(features, service)
             self._anomaly_count += 1
             anomaly_detected_total.labels(service=service, anomaly_type=anomaly_type or "unknown").inc()
+
+        # --- Severity classification ---
+        severity_assessment = self._severity_classifier.classify(
+            service=service,
+            ensemble_score=combined,
+            if_score=if_score,
+            lstm_score=lstm_score,
+            features=features,
+        )
+
+        if is_anomaly:
             logger.warning(
                 "detector.anomaly_detected",
                 service=service,
@@ -175,13 +192,33 @@ class AnomalyDetector:
                 anomaly_type=anomaly_type,
                 if_score=round(if_score, 4),
                 lstm_score=round(lstm_score, 4),
+                severity=severity_assessment.severity.label,
+                severity_level=severity_assessment.severity.value,
+                consecutive_windows=severity_assessment.consecutive_anomaly_windows,
+                score_velocity=round(severity_assessment.score_velocity, 4),
             )
+
+        # Build feature contribution details for the result
+        top_contributors = [
+            FeatureContributionDetail(
+                feature=c.feature_name,
+                z_score=round(c.z_score, 2),
+                contribution_pct=round(c.contribution_pct, 1),
+                direction=c.direction,
+            )
+            for c in severity_assessment.top_contributors
+        ]
 
         result = self._make_result(
             metrics, if_score, lstm_score, combined,
             is_anomaly=is_anomaly,
             anomaly_type=anomaly_type,
             confidence=confidence,
+            severity_label=severity_assessment.severity.label,
+            severity_level=severity_assessment.severity.value,
+            consecutive_anomaly_windows=severity_assessment.consecutive_anomaly_windows,
+            score_velocity=severity_assessment.score_velocity,
+            top_contributors=top_contributors,
         )
         self._history.append(result)
         self._last_detection = result.timestamp
@@ -217,6 +254,11 @@ class AnomalyDetector:
         is_anomaly: bool = False,
         anomaly_type: str | None = None,
         confidence: float = 0.0,
+        severity_label: str = "normal",
+        severity_level: int = 0,
+        consecutive_anomaly_windows: int = 0,
+        score_velocity: float = 0.0,
+        top_contributors: list[FeatureContributionDetail] | None = None,
     ) -> AnomalyResult:
         return AnomalyResult(
             service=metrics.service,
@@ -227,4 +269,9 @@ class AnomalyDetector:
             is_anomaly=is_anomaly,
             anomaly_type=anomaly_type,
             confidence=float(np.clip(confidence, 0.0, 1.0)),
+            severity_label=severity_label,
+            severity_level=severity_level,
+            consecutive_anomaly_windows=consecutive_anomaly_windows,
+            score_velocity=score_velocity,
+            top_contributors=top_contributors or [],
         )
