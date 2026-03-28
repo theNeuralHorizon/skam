@@ -16,7 +16,7 @@ from prometheus_client import generate_latest
 from app.collector import MetricsCollector
 from app.detector import AnomalyDetector
 from app.metrics import detection_cycle_duration_seconds
-from app.models import AnomalyHistoryQuery, AnomalyResult, DetectorStatus
+from app.models import AnomalyHistoryQuery, AnomalyResult, DetectorStatus, ScoresResponse
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -199,3 +199,28 @@ async def get_status():
         anomalies_detected=detector.anomaly_count,
         model_version=detector.model_version,
     )
+
+
+# -- dashboard-compatible endpoints ----------------------------------------
+
+@app.get("/anomaly/api/scores")
+async def get_scores():
+    """Return per-ensemble scores for all services (dashboard format)."""
+    if detector is None:
+        return {"scores": [], "threshold": 0.7}
+    scores = detector.get_latest_scores()
+    return {"scores": [s.model_dump() for s in scores], "threshold": 0.7}
+
+
+@app.get("/anomaly/api/status")
+async def get_anomaly_api_status():
+    """Return detector status in dashboard-compatible format."""
+    if detector is None:
+        return {"running": False, "services_monitored": 0, "total_anomalies": 0}
+    from app.collector import MONITORED_SERVICES
+
+    return {
+        "running": True,
+        "services_monitored": len(MONITORED_SERVICES),
+        "total_anomalies": detector.anomaly_count,
+    }

@@ -85,8 +85,8 @@ class Ensemble(Protocol):
     name: str
     cold_start_samples: int
 
-    def fit(self, X_normal: np.ndarray) -> None:
-        """Train on normal-only data."""
+    def fit(self, X_normal: np.ndarray, *, X_anomalous: np.ndarray | None = None) -> None:
+        """Train on normal data (and optionally anomalous data for supervised models)."""
         ...
 
     def score(self, features: np.ndarray) -> float:
@@ -303,6 +303,124 @@ class CombinedIFLSTMEnsemble:
         return float(np.clip(combined, 0, 1))
 
 
+@register_ensemble
+class XGBoostLSTMEnsemble:
+    """XGBoost (supervised) + temporal proxy — supervised point-wise scoring
+    combined with a Mahalanobis-like temporal component (proxy for LSTM
+    reconstruction error in the benchmark context).
+    """
+
+    name = "xgboost_lstm"
+    cold_start_samples = 50
+
+    def __init__(self) -> None:
+        from sklearn.preprocessing import RobustScaler
+        from xgboost import XGBClassifier
+
+        self._scaler = RobustScaler()
+        self._model = XGBClassifier(
+            n_estimators=200, max_depth=6, learning_rate=0.1,
+            objective="binary:logistic", eval_metric="logloss",
+            random_state=42, n_jobs=-1, use_label_encoder=False,
+        )
+        self._feat_mean: np.ndarray | None = None
+        self._feat_std: np.ndarray | None = None
+        self._trained = False
+
+    def fit(self, X_normal: np.ndarray, *, X_anomalous: np.ndarray | None = None) -> None:
+        if X_anomalous is None or len(X_anomalous) == 0:
+            # Fallback: cannot train supervised without anomalous data
+            self._feat_mean = X_normal.mean(axis=0)
+            self._feat_std = X_normal.std(axis=0)
+            self._feat_std[self._feat_std < 1e-8] = 1.0
+            return
+
+        X = np.vstack([X_normal, X_anomalous])
+        y = np.concatenate([np.zeros(len(X_normal)), np.ones(len(X_anomalous))])
+        X_scaled = self._scaler.fit_transform(X)
+        self._model.fit(X_scaled, y)
+        self._feat_mean = X_normal.mean(axis=0)
+        self._feat_std = X_normal.std(axis=0)
+        self._feat_std[self._feat_std < 1e-8] = 1.0
+        self._trained = True
+
+    def score(self, features: np.ndarray) -> float:
+        if not self._trained:
+            # Unsupervised fallback
+            z = np.abs((features - self._feat_mean) / self._feat_std)
+            return float(np.clip(z.mean() / 5.0, 0, 1))
+
+        x = self._scaler.transform(features.reshape(1, -1))
+        xgb_score = float(self._model.predict_proba(x)[0][1])
+
+        # Temporal proxy (Mahalanobis-like, same as CombinedIFLSTMEnsemble)
+        z = np.abs((features - self._feat_mean) / self._feat_std)
+        temporal_score = float(np.clip(z.mean() / 5.0, 0, 1))
+
+        combined = 0.5 * xgb_score + 0.5 * temporal_score
+        return float(np.clip(combined, 0, 1))
+
+
+@register_ensemble
+class XGBoostAttentionEnsemble:
+    """XGBoost (supervised) + attention-like temporal proxy.
+
+    In the benchmark (point-wise scoring), the attention component is
+    approximated by a weighted z-score with exponential amplification.
+    The real attention model operates on sequences at inference time.
+    """
+
+    name = "xgboost_attention"
+    cold_start_samples = 50
+
+    def __init__(self) -> None:
+        from sklearn.preprocessing import RobustScaler
+        from xgboost import XGBClassifier
+
+        self._scaler = RobustScaler()
+        self._model = XGBClassifier(
+            n_estimators=200, max_depth=6, learning_rate=0.1,
+            objective="binary:logistic", eval_metric="logloss",
+            random_state=42, n_jobs=-1, use_label_encoder=False,
+        )
+        self._feat_mean: np.ndarray | None = None
+        self._feat_std: np.ndarray | None = None
+        self._trained = False
+
+    def fit(self, X_normal: np.ndarray, *, X_anomalous: np.ndarray | None = None) -> None:
+        if X_anomalous is None or len(X_anomalous) == 0:
+            self._feat_mean = X_normal.mean(axis=0)
+            self._feat_std = X_normal.std(axis=0)
+            self._feat_std[self._feat_std < 1e-8] = 1.0
+            return
+
+        X = np.vstack([X_normal, X_anomalous])
+        y = np.concatenate([np.zeros(len(X_normal)), np.ones(len(X_anomalous))])
+        X_scaled = self._scaler.fit_transform(X)
+        self._model.fit(X_scaled, y)
+        self._feat_mean = X_normal.mean(axis=0)
+        self._feat_std = X_normal.std(axis=0)
+        self._feat_std[self._feat_std < 1e-8] = 1.0
+        self._trained = True
+
+    def score(self, features: np.ndarray) -> float:
+        if not self._trained:
+            z = np.abs((features - self._feat_mean) / self._feat_std)
+            return float(np.clip(z.mean() / 5.0, 0, 1))
+
+        x = self._scaler.transform(features.reshape(1, -1))
+        xgb_score = float(self._model.predict_proba(x)[0][1])
+
+        # Attention proxy: weighted z-score with feature importance
+        z = np.abs((features - self._feat_mean) / self._feat_std)
+        # Weight high-deviation features more (attention-like)
+        weights = np.exp(z) / np.exp(z).sum()
+        attn_score = float(np.clip((weights * z).sum() / 4.0, 0, 1))
+
+        combined = 0.5 * xgb_score + 0.5 * attn_score
+        return float(np.clip(combined, 0, 1))
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Benchmark runner
 # ═══════════════════════════════════════════════════════════════════════
@@ -377,9 +495,14 @@ def run_benchmark(
         ensemble = cls()
         print(f"\n  Evaluating: {name} (cold_start={ensemble.cold_start_samples})")
 
-        # Train
+        # Train (pass anomalous data for supervised ensembles)
         t0 = time.time()
-        ensemble.fit(X_train)
+        X_train_anomalous = X_anomalous[idx_a[:split_a]]  # 70% for supervised training
+        try:
+            ensemble.fit(X_train, X_anomalous=X_train_anomalous)
+        except TypeError:
+            # Unsupervised ensembles that don't accept X_anomalous
+            ensemble.fit(X_train)
         train_time = time.time() - t0
 
         # Score all test points

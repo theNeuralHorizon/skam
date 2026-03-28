@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
-"""Pre-train Isolation Forest and LSTM Autoencoder on the RCAEval Online
-Boutique dataset.
+"""Pre-train anomaly detection models on the RCAEval Online Boutique dataset.
+
+Models trained:
+  1. Isolation Forest        (unsupervised, point-wise)
+  2. LSTM Autoencoder        (unsupervised, temporal sequences)
+  3. XGBoost + LSTM          (supervised, point-wise XGB + LSTM reconstruction)
+  4. XGBoost + Attention     (supervised, point-wise XGB + self-attention temporal)
+  5. One-Class SVM           (unsupervised, point-wise)
 
 Usage::
 
@@ -13,6 +19,10 @@ Outputs (saved to ``ml/models/``)::
 
     isolation_forest.pkl    – scikit-learn IsolationForest + scaler
     lstm_autoencoder.pt     – PyTorch LSTM Autoencoder state dict
+    xgboost_lstm.pkl        – XGBoost classifier + scaler (for XGB+LSTM ensemble)
+    xgboost_attention.pkl   – XGBoost classifier + scaler (for XGB+Attention ensemble)
+    attention_net.pt        – PyTorch Self-Attention scorer state dict
+    ocsvm.pkl               – One-Class SVM + scaler
     training_stats.json     – feature statistics for normalisation at inference
 """
 
@@ -344,6 +354,362 @@ def save_training_stats(
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# XGBoost + LSTM Ensemble (supervised)
+# ═══════════════════════════════════════════════════════════════════════
+
+def train_xgboost_lstm(
+    X_normal: np.ndarray,
+    X_anomalous: np.ndarray,
+    output_dir: Path,
+    n_estimators: int = 200,
+    max_depth: int = 6,
+    learning_rate: float = 0.1,
+    random_state: int = 42,
+) -> dict:
+    """Train an XGBoost classifier on labeled point-wise data.
+
+    The XGBoost component scores point anomalies (supervised).  At
+    inference time, its probability output is combined 50/50 with the
+    LSTM autoencoder reconstruction error to form the XGBoost+LSTM
+    ensemble.
+    """
+    import joblib
+    from sklearn.model_selection import train_test_split
+    from sklearn.preprocessing import RobustScaler
+    from xgboost import XGBClassifier
+
+    print("\n══════════════════════════════════════")
+    print("  Training XGBoost (for XGB+LSTM)")
+    print("══════════════════════════════════════")
+
+    # Build labeled dataset: normal=0, anomaly=1
+    X = np.vstack([X_normal, X_anomalous])
+    y = np.concatenate([np.zeros(len(X_normal)), np.ones(len(X_anomalous))])
+
+    scaler = RobustScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    # Stratified split for early stopping
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_scaled, y, test_size=0.2, stratify=y, random_state=random_state,
+    )
+
+    print(f"  Total samples    : {len(X):,} ({len(X_normal):,} normal + {len(X_anomalous):,} anomaly)")
+    print(f"  Train / Val      : {len(X_train):,} / {len(X_val):,}")
+    print(f"  Estimators       : {n_estimators}")
+    print(f"  Max depth        : {max_depth}")
+
+    t0 = time.time()
+    model = XGBClassifier(
+        n_estimators=n_estimators,
+        max_depth=max_depth,
+        learning_rate=learning_rate,
+        objective="binary:logistic",
+        eval_metric="logloss",
+        random_state=random_state,
+        n_jobs=-1,
+        use_label_encoder=False,
+    )
+    model.fit(
+        X_train, y_train,
+        eval_set=[(X_val, y_val)],
+        verbose=False,
+    )
+    elapsed = time.time() - t0
+    print(f"  Training time    : {elapsed:.1f}s")
+
+    # Validation accuracy
+    val_proba = model.predict_proba(X_val)[:, 1]
+    val_preds = (val_proba >= 0.5).astype(int)
+    accuracy = (val_preds == y_val).mean()
+    print(f"  Val accuracy     : {accuracy:.4f}")
+
+    # Persist
+    artefact = {
+        "model": model,
+        "scaler": scaler,
+        "feature_order": FEATURE_ORDER,
+        "xgb_weight": 0.5,
+        "lstm_weight": 0.5,
+        "training_samples": len(X_train),
+    }
+    out_path = output_dir / "xgboost_lstm.pkl"
+    joblib.dump(artefact, out_path, compress=3)
+    size_mb = out_path.stat().st_size / 1024 / 1024
+    print(f"  Saved            : {out_path} ({size_mb:.1f} MB)")
+
+    return {
+        "training_samples": len(X_train),
+        "training_time_s": round(elapsed, 2),
+        "val_accuracy": round(accuracy, 4),
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# XGBoost + Attention Ensemble (supervised)
+# ═══════════════════════════════════════════════════════════════════════
+
+def train_xgboost_attention(
+    X_normal: np.ndarray,
+    X_anomalous: np.ndarray,
+    X_normal_seq: np.ndarray,
+    X_anomalous_seq: np.ndarray,
+    output_dir: Path,
+    epochs: int = 50,
+    batch_size: int = 64,
+    learning_rate: float = 1e-3,
+    random_state: int = 42,
+) -> dict:
+    """Train XGBoost + Self-Attention temporal scorer.
+
+    XGBoost: same as XGB+LSTM (supervised point-wise classifier).
+    Attention: ``SelfAttentionScorer`` trained as binary classifier on
+    labeled temporal sequences.
+    """
+    import joblib
+    import torch
+    from sklearn.model_selection import train_test_split
+    from sklearn.preprocessing import RobustScaler
+    from torch.utils.data import DataLoader, TensorDataset
+    from xgboost import XGBClassifier
+
+    from ml.training.attention_model import SelfAttentionScorer
+
+    print("\n══════════════════════════════════════")
+    print("  Training XGBoost + Self-Attention")
+    print("══════════════════════════════════════")
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # ── XGBoost component (point-wise, supervised) ─────────────────────
+    X_pw = np.vstack([X_normal, X_anomalous])
+    y_pw = np.concatenate([np.zeros(len(X_normal)), np.ones(len(X_anomalous))])
+
+    scaler = RobustScaler()
+    X_pw_scaled = scaler.fit_transform(X_pw)
+    X_tr, X_va, y_tr, y_va = train_test_split(
+        X_pw_scaled, y_pw, test_size=0.2, stratify=y_pw, random_state=random_state,
+    )
+
+    print(f"  XGBoost samples  : {len(X_pw):,}")
+
+    t0 = time.time()
+    xgb_model = XGBClassifier(
+        n_estimators=200, max_depth=6, learning_rate=0.1,
+        objective="binary:logistic", eval_metric="logloss",
+        random_state=random_state, n_jobs=-1, use_label_encoder=False,
+    )
+    xgb_model.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], verbose=False)
+    xgb_time = time.time() - t0
+    print(f"  XGBoost time     : {xgb_time:.1f}s")
+
+    # Persist XGBoost component
+    xgb_artefact = {
+        "model": xgb_model,
+        "scaler": scaler,
+        "feature_order": FEATURE_ORDER,
+        "xgb_weight": 0.5,
+        "attention_weight": 0.5,
+        "training_samples": len(X_tr),
+    }
+    xgb_path = output_dir / "xgboost_attention.pkl"
+    joblib.dump(xgb_artefact, xgb_path, compress=3)
+    print(f"  XGBoost saved    : {xgb_path}")
+
+    # ── Attention component (temporal, supervised) ─────────────────────
+    input_dim = X_normal_seq.shape[2]
+    seq_length = X_normal_seq.shape[1]
+
+    # Min-max normalise sequences
+    flat = X_normal_seq.reshape(-1, input_dim)
+    feat_min = flat.min(axis=0)
+    feat_max = flat.max(axis=0)
+    feat_range = feat_max - feat_min
+    feat_range[feat_range == 0] = 1.0
+
+    def norm_seq(arr: np.ndarray) -> np.ndarray:
+        return (arr - feat_min) / feat_range
+
+    X_seq = np.vstack([norm_seq(X_normal_seq), norm_seq(X_anomalous_seq)])
+    y_seq = np.concatenate([
+        np.zeros(len(X_normal_seq)),
+        np.ones(len(X_anomalous_seq)),
+    ])
+
+    # Stratified split
+    idx = np.arange(len(X_seq))
+    rng = np.random.default_rng(random_state)
+    rng.shuffle(idx)
+    split = int(0.8 * len(idx))
+    train_idx, val_idx = idx[:split], idx[split:]
+
+    train_ds = TensorDataset(
+        torch.FloatTensor(X_seq[train_idx]),
+        torch.FloatTensor(y_seq[train_idx]).unsqueeze(1),
+    )
+    val_ds = TensorDataset(
+        torch.FloatTensor(X_seq[val_idx]),
+        torch.FloatTensor(y_seq[val_idx]).unsqueeze(1),
+    )
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_ds, batch_size=batch_size)
+
+    print(f"  Attention seqs   : {len(X_seq):,} ({len(train_idx)} train / {len(val_idx)} val)")
+    print(f"  Device           : {device}")
+
+    attn_model = SelfAttentionScorer(input_dim=input_dim, d_model=32, num_heads=4).to(device)
+    total_params = sum(p.numel() for p in attn_model.parameters())
+    print(f"  Attention params : {total_params:,}")
+
+    criterion = torch.nn.BCELoss()
+    optimizer = torch.optim.Adam(attn_model.parameters(), lr=learning_rate)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="min", factor=0.5, patience=5,
+    )
+
+    t0 = time.time()
+    best_val_loss = float("inf")
+    best_state = None
+
+    for epoch in range(1, epochs + 1):
+        attn_model.train()
+        epoch_loss = 0.0
+        n_batches = 0
+        for X_batch, y_batch in train_loader:
+            X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+            optimizer.zero_grad()
+            pred = attn_model(X_batch)
+            loss = criterion(pred, y_batch)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(attn_model.parameters(), max_norm=1.0)
+            optimizer.step()
+            epoch_loss += loss.item()
+            n_batches += 1
+
+        avg_loss = epoch_loss / n_batches
+
+        # Validation
+        attn_model.eval()
+        val_loss = 0.0
+        val_batches = 0
+        with torch.no_grad():
+            for X_batch, y_batch in val_loader:
+                X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+                pred = attn_model(X_batch)
+                val_loss += criterion(pred, y_batch).item()
+                val_batches += 1
+        avg_val = val_loss / max(val_batches, 1)
+        scheduler.step(avg_val)
+
+        if avg_val < best_val_loss:
+            best_val_loss = avg_val
+            best_state = {k: v.cpu().clone() for k, v in attn_model.state_dict().items()}
+
+        if epoch % 10 == 0 or epoch == 1:
+            print(f"  Epoch {epoch:3d}/{epochs}  train={avg_loss:.4f}  val={avg_val:.4f}")
+
+    attn_time = time.time() - t0
+    print(f"  Attention time   : {attn_time:.1f}s")
+    print(f"  Best val loss    : {best_val_loss:.4f}")
+
+    # Persist attention model
+    checkpoint = {
+        "model_state_dict": best_state or attn_model.state_dict(),
+        "input_dim": input_dim,
+        "d_model": 32,
+        "num_heads": 4,
+        "seq_length": seq_length,
+        "feat_min": feat_min.tolist(),
+        "feat_max": feat_max.tolist(),
+        "total_params": total_params,
+    }
+    attn_path = output_dir / "attention_net.pt"
+    torch.save(checkpoint, attn_path)
+    size_kb = attn_path.stat().st_size / 1024
+    print(f"  Attention saved  : {attn_path} ({size_kb:.0f} KB)")
+
+    return {
+        "xgb_training_samples": len(X_tr),
+        "xgb_training_time_s": round(xgb_time, 2),
+        "attention_sequences": len(X_seq),
+        "attention_training_time_s": round(attn_time, 2),
+        "attention_best_val_loss": round(best_val_loss, 4),
+        "attention_params": total_params,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# One-Class SVM (unsupervised)
+# ═══════════════════════════════════════════════════════════════════════
+
+def train_ocsvm(
+    X_normal: np.ndarray,
+    output_dir: Path,
+    nu: float = 0.05,
+    max_samples: int = 2000,
+    random_state: int = 42,
+) -> dict:
+    """Train a One-Class SVM on normal-only data.
+
+    Uses RBF kernel; subsamples to ``max_samples`` since OCSVM is
+    O(n^2) in memory.
+    """
+    import joblib
+    from sklearn.preprocessing import RobustScaler
+    from sklearn.svm import OneClassSVM
+
+    print("\n══════════════════════════════════════")
+    print("  Training One-Class SVM")
+    print("══════════════════════════════════════")
+
+    scaler = RobustScaler()
+    X_scaled = scaler.fit_transform(X_normal)
+
+    # Subsample if needed
+    if len(X_scaled) > max_samples:
+        rng = np.random.default_rng(random_state)
+        idx = rng.choice(len(X_scaled), max_samples, replace=False)
+        X_train = X_scaled[idx]
+        print(f"  Subsampled       : {len(X_normal):,} → {max_samples:,}")
+    else:
+        X_train = X_scaled
+
+    print(f"  Training samples : {len(X_train):,}")
+    print(f"  Kernel           : rbf")
+    print(f"  Nu               : {nu}")
+
+    t0 = time.time()
+    model = OneClassSVM(kernel="rbf", gamma="auto", nu=nu)
+    model.fit(X_train)
+    elapsed = time.time() - t0
+    print(f"  Training time    : {elapsed:.1f}s")
+
+    # Quick self-check
+    preds = model.predict(X_train)
+    n_anomaly = (preds == -1).sum()
+    print(f"  Self-check       : {n_anomaly}/{len(preds)} flagged ({n_anomaly/len(preds)*100:.1f}%)")
+
+    # Persist
+    artefact = {
+        "model": model,
+        "scaler": scaler,
+        "feature_order": FEATURE_ORDER,
+        "nu": nu,
+        "training_samples": len(X_train),
+    }
+    out_path = output_dir / "ocsvm.pkl"
+    joblib.dump(artefact, out_path, compress=3)
+    size_kb = out_path.stat().st_size / 1024
+    print(f"  Saved            : {out_path} ({size_kb:.0f} KB)")
+
+    return {
+        "training_samples": len(X_train),
+        "training_time_s": round(elapsed, 2),
+        "self_check_anomaly_pct": round(n_anomaly / len(preds) * 100, 2),
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -413,12 +779,30 @@ def main() -> None:
         batch_size=args.batch_size,
     )
 
+    # ── Phase 6: Train XGBoost + LSTM ──────────────────────────────
+    xgb_lstm_stats = train_xgboost_lstm(X_normal, X_anomalous, output_dir)
+
+    # ── Phase 7: Train XGBoost + Attention ─────────────────────────
+    xgb_attn_stats = train_xgboost_attention(
+        X_normal, X_anomalous,
+        X_normal_seq, X_anomalous_seq,
+        output_dir,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+    )
+
+    # ── Phase 8: Train One-Class SVM ───────────────────────────────
+    ocsvm_stats = train_ocsvm(X_normal, output_dir)
+
     # ── Summary ───────────────────────────────────────────────────────
     summary = {
         "dataset": str(data_dir),
         "interval_seconds": args.interval,
         "isolation_forest": if_stats,
         "lstm_autoencoder": lstm_stats,
+        "xgboost_lstm": xgb_lstm_stats,
+        "xgboost_attention": xgb_attn_stats,
+        "ocsvm": ocsvm_stats,
         "feature_order": FEATURE_ORDER,
     }
 
@@ -434,7 +818,11 @@ def main() -> None:
     print(f"║  LSTM sequences   : {lstm_stats['training_samples']:>8,}               ║")
     print(f"║  LSTM train time  : {lstm_stats['training_time_s']:>7.1f}s               ║")
     print(f"║  LSTM separation  : {lstm_stats['separation_ratio']:>7.2f}x               ║")
-    print(f"║  LSTM threshold   : {lstm_stats['threshold']:>10.6f}            ║")
+    print(f"║  XGB+LSTM acc     : {xgb_lstm_stats['val_accuracy']:>7.4f}                ║")
+    print(f"║  XGB+LSTM time    : {xgb_lstm_stats['training_time_s']:>7.1f}s               ║")
+    print(f"║  XGB+Attn val     : {xgb_attn_stats['attention_best_val_loss']:>7.4f}                ║")
+    print(f"║  OCSVM samples    : {ocsvm_stats['training_samples']:>8,}               ║")
+    print(f"║  OCSVM time       : {ocsvm_stats['training_time_s']:>7.1f}s               ║")
     print("╚══════════════════════════════════════════════════╝")
     print(f"\n  Artefacts in: {output_dir}/")
     for f in sorted(output_dir.iterdir()):

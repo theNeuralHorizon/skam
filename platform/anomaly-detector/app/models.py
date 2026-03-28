@@ -62,3 +62,40 @@ class AnomalyHistoryQuery(BaseModel):
     service: Optional[str] = None
     minutes: int = Field(default=60, ge=1, le=1440)
     anomalies_only: bool = False
+
+
+# ── Dashboard-compatible score models (for /anomaly/api/scores) ─────
+
+
+class PerEnsembleScores(BaseModel):
+    """Per-ensemble anomaly scores for dashboard comparison."""
+
+    isolation_forest: float = Field(default=0.0, ge=0.0, le=1.0)
+    lstm_autoencoder: float = Field(default=0.0, ge=0.0, le=1.0)
+    if_lstm_combined: float = Field(default=0.0, ge=0.0, le=1.0)
+    xgboost_lstm: float = Field(default=0.0, ge=0.0, le=1.0)
+    xgboost_attention: float = Field(default=0.0, ge=0.0, le=1.0)
+    ocsvm: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+class ServiceScore(BaseModel):
+    """Full score object for a single service (dashboard format)."""
+
+    service: str
+    isoforest_score: float = 0.0
+    lstm_score: float = 0.0
+    ensemble_score: float = 0.0
+    is_anomaly: bool = False
+    features: dict[str, float] = Field(default_factory=dict)
+    severity_label: str = "normal"
+    severity_level: int = 0
+    consecutive_windows: int = 0
+    score_velocity: float = 0.0
+    per_ensemble: PerEnsembleScores = Field(default_factory=PerEnsembleScores)
+
+
+class ScoresResponse(BaseModel):
+    """Response format for /anomaly/api/scores."""
+
+    scores: list[ServiceScore] = Field(default_factory=list)
+    threshold: float = 0.7
