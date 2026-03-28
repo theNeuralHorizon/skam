@@ -1,27 +1,49 @@
 export default function EventLog({ events, engine }) {
     const cooldowns = engine?.services_in_cooldown || []
 
-    // Compute healing time: time from detection (anomaly event) to recovery (completed event)
     function getHealingTime(evt) {
+        // Prefer healing_time_ms from backend (most accurate)
+        if (evt.healing_time_ms) return (evt.healing_time_ms / 1000).toFixed(1)
         if (evt.status !== 'completed' || !evt.timestamp) return null
-        if (!evt.detected_at && !evt.duration_seconds) return null
         if (evt.detected_at) {
             const detected = new Date(evt.detected_at).getTime()
             const recovered = new Date(evt.timestamp).getTime()
-            const diffSec = Math.round((recovered - detected) / 1000)
-            if (diffSec > 0) return diffSec
+            const diffSec = (recovered - detected) / 1000
+            if (diffSec > 0) return diffSec.toFixed(1)
         }
-        return evt.duration_seconds || null
+        return evt.duration_seconds ? evt.duration_seconds.toFixed(1) : null
     }
 
     function getSeverityFromEvent(evt) {
-        // Use severity_label from the event if available
-        if (evt.severity_label) return evt.severity_label
-        // Derive from risk_level as fallback
-        if (evt.risk_level === 'high') return 'CRITICAL'
-        if (evt.risk_level === 'medium') return 'HIGH'
-        if (evt.risk_level === 'low') return 'MEDIUM'
+        if (evt.severity_label) return evt.severity_label.toUpperCase()
+        const risk = evt.risk_level
+        if (risk === 'high') return 'CRITICAL'
+        if (risk === 'medium') return 'HIGH'
+        if (risk === 'low') return 'MEDIUM'
         return 'NORMAL'
+    }
+
+    // Download events as JSON
+    function downloadLogs() {
+        const data = events.map(evt => ({
+            id: evt.id,
+            timestamp: evt.timestamp,
+            service: evt.service,
+            action: evt.action,
+            status: evt.status,
+            severity: getSeverityFromEvent(evt),
+            policy: evt.policy_matched,
+            healing_time_s: getHealingTime(evt),
+            error: evt.error || null,
+        }))
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+        a.download = `skam-recovery-events-${ts}.json`
+        a.click()
+        URL.revokeObjectURL(url)
     }
 
     return (
@@ -61,7 +83,16 @@ export default function EventLog({ events, engine }) {
             <div className="card">
                 <div className="card-header">
                     <div className="card-title">Recovery Events</div>
-                    <div className="card-subtitle">{events.length} events &middot; live via WebSocket</div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <button className="sel" onClick={downloadLogs}
+                            style={{ cursor: 'pointer', fontSize: 11, padding: '4px 10px' }}
+                            title="Download events as JSON">
+                            Download Logs
+                        </button>
+                        <span className="card-subtitle">
+                            {events.length} events
+                        </span>
+                    </div>
                 </div>
 
                 {events.length === 0 ? (
@@ -76,24 +107,18 @@ export default function EventLog({ events, engine }) {
                             const healTime = getHealingTime(evt)
 
                             return (
-                                <div key={evt.id || i} className="event-row">
+                                <div key={`${evt.id}-${i}`} className="event-row">
                                     <div className={`evt-dot ${evt.status}`} />
                                     <span className="evt-svc">{evt.service}</span>
                                     <span className="evt-act">{evt.action}</span>
-                                    <span className={`tag ${evt.risk_level}`}>{evt.risk_level}</span>
                                     <span className={`severity-badge ${sevClass}`} style={{ marginTop: 0 }}>
                                         {sevLabel}
                                     </span>
                                     <span style={{ fontSize: 11, color: 'var(--text-2)' }}>
                                         {evt.policy_matched}
                                     </span>
-                                    {evt.duration_seconds != null && (
-                                        <span style={{ fontSize: 11, color: 'var(--teal)', fontFamily: "'JetBrains Mono', monospace" }}>
-                                            {evt.duration_seconds}s
-                                        </span>
-                                    )}
                                     {healTime != null && (
-                                        <span className="evt-heal-time" title="Healing time (detection to recovery)">
+                                        <span className="evt-heal-time" title="Time from detection to recovery">
                                             healed {healTime}s
                                         </span>
                                     )}

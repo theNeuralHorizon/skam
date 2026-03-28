@@ -36,12 +36,14 @@ function scoreClass(v) {
     return 'safe'
 }
 
+function primaryScore(s) {
+    return s?.per_ensemble?.xgboost_lstm ?? s?.ensemble_score ?? 0
+}
+
 function getSeverityLabel(score) {
-    // Use backend severity_label if present, otherwise derive from score
-    if (score?.severity_label) return score.severity_label
-    const v = score?.ensemble_score ?? 0
-    if (v >= 0.8) return 'CRITICAL'
-    if (v >= 0.65) return 'HIGH'
+    const v = primaryScore(score)
+    if (v >= 0.85) return 'CRITICAL'
+    if (v >= 0.7) return 'HIGH'
     if (v >= 0.5) return 'MEDIUM'
     if (v >= 0.3) return 'LOW'
     return 'NORMAL'
@@ -80,8 +82,8 @@ export default function ServiceTopology({ scores }) {
                     {ALL_SERVICES.map(svc => {
                         const p = POSITIONS[svc]
                         const d = byService[svc]
-                        const v = d?.ensemble_score ?? 0
-                        const bad = d?.is_anomaly ?? false
+                        const v = primaryScore(d)
+                        const bad = v > 0.7
                         const sevLabel = getSeverityLabel(d)
                         const sevColor = SEVERITY_COLORS[sevLabel] || SEVERITY_COLORS.NORMAL
                         const fill = bad ? 'var(--err)' : v > 0.4 ? 'var(--warn)' : 'var(--ok)'
@@ -131,8 +133,8 @@ export default function ServiceTopology({ scores }) {
             <div className="topology-grid">
                 {ALL_SERVICES.map(svc => {
                     const d = byService[svc]
-                    const v = d?.ensemble_score ?? 0
-                    const bad = d?.is_anomaly ?? false
+                    const v = primaryScore(d)
+                    const bad = v > 0.7
                     const cls = bad ? 'anomaly' : v > 0.4 ? 'warning' : ''
                     const sevLabel = getSeverityLabel(d)
                     const sevClass = `sev-${sevLabel.toLowerCase()}`
@@ -143,7 +145,7 @@ export default function ServiceTopology({ scores }) {
                             <div className={`svc-score score-${scoreClass(v)}`}>
                                 {v.toFixed(3)}
                             </div>
-                            <div className="svc-label">anomaly score</div>
+                            <div className="svc-label">XGBoost+LSTM</div>
                             <div className={`severity-badge ${sevClass}`}>
                                 {sevLabel}
                             </div>

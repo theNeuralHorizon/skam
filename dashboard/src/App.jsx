@@ -72,7 +72,7 @@ function App() {
     return () => { clearTimeout(timer); ws?.close() }
   }, [])
 
-  const anomalyCount = scores.filter(s => s.is_anomaly).length
+  const anomalyCount = scores.filter(s => (s.per_ensemble?.xgboost_lstm ?? s.ensemble_score ?? 0) > 0.7).length
 
   return (
     <div className="app">
@@ -97,7 +97,7 @@ function App() {
           )}
           <div className="stat-pill recovery">
             <span className="stat-dot" />
-            {engineStatus?.total_recoveries || 0} healed
+            {engineStatus?.total_recoveries || 0} recoveries
           </div>
         </div>
       </header>

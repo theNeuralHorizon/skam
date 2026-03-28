@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts'
 
 const SEVERITY_LEVELS = ['NORMAL', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL']
@@ -10,26 +10,62 @@ const SEVERITY_COLORS = {
     CRITICAL: '#f43f5e',
 }
 
+// Available ensembles for comparison (EWMA and Z-Score dropped)
+const ENSEMBLES = [
+    { key: 'isolation_forest', label: 'Isolation Forest', color: '#3b82f6' },
+    { key: 'lstm_autoencoder', label: 'LSTM Autoenc.', color: '#14b8a6' },
+    { key: 'if_lstm_combined', label: 'IF+LSTM (Prod)', color: '#8b5cf6' },
+    { key: 'xgboost_lstm', label: 'XGBoost+LSTM', color: '#2ecc71' },
+    { key: 'xgboost_attention', label: 'XGBoost+Attn', color: '#27ae60' },
+    { key: 'ocsvm', label: 'One-Class SVM', color: '#f39c12' },
+]
+
+function primaryScore(s) {
+    return s?.per_ensemble?.xgboost_lstm ?? s?.ensemble_score ?? 0
+}
+
 function deriveSeverity(score) {
-    if (score?.severity_label) return score.severity_label
-    const v = score?.ensemble_score ?? 0
-    if (v >= 0.8) return 'CRITICAL'
-    if (v >= 0.65) return 'HIGH'
+    const v = primaryScore(score)
+    if (v >= 0.85) return 'CRITICAL'
+    if (v >= 0.7) return 'HIGH'
     if (v >= 0.5) return 'MEDIUM'
     if (v >= 0.3) return 'LOW'
     return 'NORMAL'
 }
 
 export default function LiveMetrics({ scores, detector }) {
-    const barData = useMemo(() =>
-        scores.map(s => ({
-            name: s.service.replace('-service', '').replace('api-', 'gw'),
-            isoforest: s.isoforest_score ?? 0,
-            lstm: s.lstm_score ?? 0,
-            ensemble: s.ensemble_score ?? 0,
-        })), [scores])
+    const [selectedEnsembles, setSelectedEnsembles] = useState(
+        () => new Set(ENSEMBLES.map(e => e.key))
+    )
 
-    // Compute severity distribution from scores
+    function toggleEnsemble(key) {
+        setSelectedEnsembles(prev => {
+            const next = new Set(prev)
+            if (next.has(key)) {
+                if (next.size > 1) next.delete(key)  // keep at least 1
+            } else {
+                next.add(key)
+            }
+            return next
+        })
+    }
+
+    const barData = useMemo(() =>
+        scores.map(s => {
+            const ens = s.per_ensemble || {}
+            const row = {
+                name: s.service.replace('-service', '').replace('api-', 'gw'),
+            }
+            for (const e of ENSEMBLES) {
+                row[e.key] = ens[e.key] ?? (
+                    e.key === 'isolation_forest' ? s.isoforest_score :
+                    e.key === 'lstm_autoencoder' ? s.lstm_score :
+                    e.key === 'if_lstm_combined' ? s.ensemble_score : 0
+                )
+            }
+            return row
+        }), [scores])
+
     const severityDist = useMemo(() => {
         const counts = {}
         for (const level of SEVERITY_LEVELS) counts[level] = 0
@@ -39,6 +75,8 @@ export default function LiveMetrics({ scores, detector }) {
         }
         return counts
     }, [scores])
+
+    const activeEnsembles = ENSEMBLES.filter(e => selectedEnsembles.has(e.key))
 
     return (
         <div>
@@ -56,7 +94,7 @@ export default function LiveMetrics({ scores, detector }) {
                 <div className="card">
                     <div className="metric-lbl">Anomalies Detected</div>
                     <div className="metric-val" style={{ color: 'var(--err)' }}>
-                        {detector?.total_anomalies ?? 0}
+                        {detector?.total_anomalies ?? scores.filter(s => s.is_anomaly).length}
                     </div>
                 </div>
             </div>
@@ -79,11 +117,31 @@ export default function LiveMetrics({ scores, detector }) {
                 </div>
             </div>
 
+            {/* Model Score Comparison with ensemble checkboxes */}
             <div className="card" style={{ marginBottom: 16 }}>
-                <div className="card-title" style={{ marginBottom: 14 }}>Model Score Comparison</div>
+                <div className="card-header">
+                    <div className="card-title">Model Score Comparison</div>
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
+                    {ENSEMBLES.map(e => (
+                        <label key={e.key} style={{
+                            display: 'flex', alignItems: 'center', gap: 5,
+                            cursor: 'pointer', fontSize: 11, color: selectedEnsembles.has(e.key) ? e.color : 'var(--text-2)',
+                            padding: '3px 8px', borderRadius: 4,
+                            background: selectedEnsembles.has(e.key) ? `${e.color}18` : 'transparent',
+                            border: `1px solid ${selectedEnsembles.has(e.key) ? e.color + '40' : 'var(--border)'}`,
+                            transition: 'all 0.15s',
+                        }}>
+                            <input type="checkbox" checked={selectedEnsembles.has(e.key)}
+                                onChange={() => toggleEnsemble(e.key)}
+                                style={{ accentColor: e.color, width: 12, height: 12 }} />
+                            {e.label}
+                        </label>
+                    ))}
+                </div>
                 {barData.length > 0 ? (
                     <ResponsiveContainer width="100%" height={280}>
-                        <BarChart data={barData} barGap={2}>
+                        <BarChart data={barData} barGap={1} barCategoryGap="15%">
                             <CartesianGrid strokeDasharray="3 3" stroke="#243049" vertical={false} />
                             <XAxis dataKey="name" stroke="#6b7a94" fontSize={10} tickLine={false} />
                             <YAxis domain={[0, 1]} stroke="#6b7a94" fontSize={10} tickLine={false} />
@@ -93,10 +151,11 @@ export default function LiveMetrics({ scores, detector }) {
                                     borderRadius: 6, fontSize: 11,
                                 }}
                             />
-                            <Legend wrapperStyle={{ fontSize: 11, color: '#6b7a94' }} />
-                            <Bar dataKey="isoforest" fill="#3b82f6" name="Isolation Forest" radius={[3, 3, 0, 0]} />
-                            <Bar dataKey="lstm" fill="#14b8a6" name="LSTM Autoenc." radius={[3, 3, 0, 0]} />
-                            <Bar dataKey="ensemble" fill="#8b5cf6" name="Ensemble" radius={[3, 3, 0, 0]} />
+                            <Legend wrapperStyle={{ fontSize: 10, color: '#6b7a94' }} />
+                            {activeEnsembles.map(e => (
+                                <Bar key={e.key} dataKey={e.key} fill={e.color}
+                                    name={e.label} radius={[2, 2, 0, 0]} />
+                            ))}
                         </BarChart>
                     </ResponsiveContainer>
                 ) : (
