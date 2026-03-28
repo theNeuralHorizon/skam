@@ -1,7 +1,16 @@
-import type { ServiceHealth } from '../types'
+import type { ServiceHealth, AnomalyEvent, SeverityLevel } from '../types'
 
 interface Props {
   services: ServiceHealth[]
+  latestAnomalies?: Map<string, AnomalyEvent>
+}
+
+const SEVERITY_STYLES: Record<SeverityLevel, { badge: string; pulse: boolean }> = {
+  normal:   { badge: 'bg-green-600 text-white', pulse: false },
+  low:      { badge: 'bg-blue-600 text-white', pulse: false },
+  medium:   { badge: 'bg-yellow-600 text-black', pulse: false },
+  high:     { badge: 'bg-orange-500 text-white', pulse: true },
+  critical: { badge: 'bg-red-600 text-white', pulse: true },
 }
 
 const SERVICE_POSITIONS: Record<string, { x: number; y: number }> = {
@@ -27,7 +36,7 @@ const STATUS_COLORS = {
   unhealthy: { border: 'border-red-500', bg: 'bg-red-500/10', dot: 'bg-red-500' },
 }
 
-export function ServiceTopology({ services }: Props) {
+export function ServiceTopology({ services, latestAnomalies }: Props) {
   const serviceMap = Object.fromEntries(services.map((s) => [s.name, s]))
 
   return (
@@ -55,6 +64,9 @@ export function ServiceTopology({ services }: Props) {
           const pos = SERVICE_POSITIONS[svc.name]
           if (!pos) return null
           const colors = STATUS_COLORS[svc.status]
+          const anomaly = latestAnomalies?.get(svc.name)
+          const severity = anomaly?.severity || 'normal'
+          const sevStyle = SEVERITY_STYLES[severity]
 
           return (
             <div
@@ -63,10 +75,15 @@ export function ServiceTopology({ services }: Props) {
               style={{ left: pos.x, top: pos.y }}
             >
               <div className="flex items-center gap-1.5 mb-1">
-                <div className={`w-2 h-2 rounded-full ${colors.dot}`} />
+                <div className={`w-2 h-2 rounded-full ${colors.dot} ${sevStyle.pulse ? 'animate-pulse' : ''}`} />
                 <span className="text-xs font-medium text-white truncate">
                   {svc.name.replace('-service', '').replace('api-', '')}
                 </span>
+                {severity !== 'normal' && (
+                  <span className={`text-[8px] px-1 py-px rounded font-bold uppercase ${sevStyle.badge}`}>
+                    {severity}
+                  </span>
+                )}
               </div>
               <div className="flex justify-between text-[10px] text-gray-400">
                 <span>{svc.requestRate.toFixed(0)} rps</span>
@@ -74,6 +91,12 @@ export function ServiceTopology({ services }: Props) {
                   {(svc.errorRate * 100).toFixed(1)}% err
                 </span>
               </div>
+              {anomaly && anomaly.topContributors?.length > 0 && severity !== 'normal' && (
+                <div className="mt-1 text-[9px] text-gray-500">
+                  <span className="text-gray-400">cause:</span>{' '}
+                  {anomaly.topContributors[0].feature} ({anomaly.topContributors[0].direction})
+                </div>
+              )}
             </div>
           )
         })}
