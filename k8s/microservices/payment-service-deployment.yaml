@@ -22,7 +22,8 @@ spec:
     spec:
       containers:
         - name: payment-service
-          image: localhost:5111/skam/payment-service:latest
+          image: skam-registry:5111/skam/payment-service:latest
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8084
               name: http

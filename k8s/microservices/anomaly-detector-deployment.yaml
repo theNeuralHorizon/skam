@@ -23,7 +23,8 @@ spec:
     spec:
       containers:
         - name: anomaly-detector
-          image: localhost:5111/skam/anomaly-detector:latest
+          image: skam-registry:5111/skam/anomaly-detector:latest
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8091
               name: http

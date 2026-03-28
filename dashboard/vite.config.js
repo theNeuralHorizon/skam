@@ -8,16 +8,16 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/anomaly': {
-        target: 'http://localhost:9000',
+        target: 'http://localhost:9001',
         changeOrigin: true,
       },
       '/decision': {
-        target: 'http://localhost:9000',
+        target: 'http://localhost:9001',
         changeOrigin: true,
         ws: true,
       },
       '/chaos': {
-        target: 'http://localhost:9000',
+        target: 'http://localhost:9001',
         changeOrigin: true,
       },
     },

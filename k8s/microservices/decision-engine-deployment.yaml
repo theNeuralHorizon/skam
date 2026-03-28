@@ -24,7 +24,7 @@ spec:
       serviceAccountName: skam-platform-sa
       containers:
         - name: decision-engine
-          image: skam-platform/decision-engine:latest
+          image: skam-registry:5111/skam/decision-engine:latest
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8092

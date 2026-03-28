@@ -22,7 +22,8 @@ spec:
     spec:
       containers:
         - name: order-service
-          image: localhost:5111/skam/order-service:latest
+          image: skam-registry:5111/skam/order-service:latest
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8083
               name: http
