@@ -17,7 +17,7 @@ const ENSEMBLES = [
     { key: 'if_lstm_combined', label: 'IF+LSTM (Prod)', color: '#8b5cf6' },
     { key: 'xgboost_lstm', label: 'XGBoost+LSTM', color: '#2ecc71' },
     { key: 'xgboost_attention', label: 'XGBoost+Attn', color: '#27ae60' },
-    { key: 'ocsvm', label: 'One-Class SVM', color: '#f39c12' },
+    { key: 'xgboost_meta', label: 'XGBoost Meta', color: '#f39c12' },
 ]
 
 function primaryScore(s) {

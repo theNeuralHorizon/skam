@@ -4,7 +4,6 @@ const EDGES = [
     ['api-gateway', 'user-service'],
     ['api-gateway', 'product-service'],
     ['api-gateway', 'order-service'],
-    ['api-gateway', 'cart-service'],
     ['order-service', 'payment-service'],
     ['order-service', 'notification-service'],
     ['payment-service', 'notification-service'],
@@ -12,10 +11,9 @@ const EDGES = [
 
 const POSITIONS = {
     'api-gateway': { x: 400, y: 45 },
-    'user-service': { x: 140, y: 145 },
-    'product-service': { x: 300, y: 145 },
-    'order-service': { x: 500, y: 145 },
-    'cart-service': { x: 660, y: 145 },
+    'user-service': { x: 160, y: 145 },
+    'product-service': { x: 400, y: 145 },
+    'order-service': { x: 640, y: 145 },
     'payment-service': { x: 350, y: 245 },
     'notification-service': { x: 550, y: 245 },
 }

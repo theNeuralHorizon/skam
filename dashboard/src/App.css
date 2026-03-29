@@ -51,6 +51,61 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* -- Connection Banner -- */
+
+.connection-banner {
+  padding: 8px 28px;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.connection-banner.disconnected {
+  background: var(--err-dim);
+  color: var(--err);
+  border-bottom: 1px solid rgba(244, 63, 94, 0.3);
+  animation: blink 1.5s step-end infinite;
+}
+
+.connection-banner.loading {
+  background: var(--accent-dim);
+  color: var(--accent);
+  border-bottom: 1px solid rgba(59, 130, 246, 0.3);
+}
+
+.last-updated {
+  font-size: 10px;
+  color: var(--text-2);
+  font-family: 'JetBrains Mono', monospace;
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
+}
+
+.ws-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--text-2);
+}
+
+.ws-status .ws-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.ws-status .ws-dot.connected {
+  background: var(--ok);
+}
+
+.ws-status .ws-dot.disconnected {
+  background: var(--err);
+  animation: blink 1s step-end infinite;
+}
+
 /* -- Header -- */
 
 .header {
@@ -657,4 +712,306 @@ body {
   font-weight: 600;
   font-size: 12px;
   color: var(--text-0);
+}
+
+/* ── Prediction Mode ────────────────────────────────────────────────── */
+
+.mode-toggle {
+  padding: 6px 16px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  color: var(--text-1);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-family: inherit;
+  margin-left: 6px;
+}
+
+.mode-toggle:hover {
+  border-color: var(--violet);
+  color: var(--text-0);
+}
+
+.mode-toggle.active {
+  background: rgba(139, 92, 246, 0.15);
+  border-color: var(--violet);
+  color: var(--violet);
+}
+
+.stat-pill.prediction {
+  background: rgba(139, 92, 246, 0.12);
+  border-color: rgba(139, 92, 246, 0.25);
+  color: var(--violet);
+}
+
+.stat-pill.prediction .stat-dot {
+  animation: blink 1.5s step-end infinite;
+}
+
+/* ── Prediction Dashboard ───────────────────────────────────────────── */
+
+.prediction-dashboard {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.pred-summary {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+
+.pred-stat-card {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px;
+  text-align: center;
+}
+
+.pred-stat-value {
+  font-size: 32px;
+  font-weight: 700;
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--text-0);
+}
+
+.pred-stat-value.pred-high-text {
+  color: var(--warn);
+}
+
+.pred-stat-label {
+  font-size: 11px;
+  color: var(--text-2);
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  margin-top: 4px;
+}
+
+.pred-section {
+  margin-bottom: 0;
+}
+
+/* Prediction cards */
+
+.pred-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 12px;
+}
+
+.pred-card {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  position: relative;
+}
+
+.pred-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  border-radius: 8px 8px 0 0;
+}
+
+.pred-card.pred-medium::before {
+  background: var(--warn);
+}
+
+.pred-card.pred-high::before {
+  background: var(--peach);
+}
+
+.pred-card.pred-critical::before {
+  background: var(--err);
+}
+
+.pred-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.pred-card-service {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text-0);
+}
+
+.pred-card-type {
+  font-size: 9px;
+}
+
+.pred-card-event {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-0);
+  margin-bottom: 12px;
+}
+
+.pred-card-details {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pred-detail {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pred-detail-label {
+  font-size: 10px;
+  color: var(--text-2);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  min-width: 90px;
+}
+
+.pred-detail-value {
+  font-size: 12px;
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--text-0);
+}
+
+.pred-countdown {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.pred-action {
+  color: var(--teal);
+}
+
+/* Confidence bar */
+
+.pred-confidence-bar {
+  flex: 1;
+  height: 4px;
+  background: var(--bg-3);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.pred-confidence-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.3s;
+}
+
+.pred-confidence-fill.pred-medium {
+  background: var(--warn);
+}
+
+.pred-confidence-fill.pred-high {
+  background: var(--peach);
+}
+
+.pred-confidence-fill.pred-critical {
+  background: var(--err);
+}
+
+/* Prediction card extra details */
+
+.pred-card-extra {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.pred-extra-item {
+  font-size: 10px;
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--text-2);
+  padding: 2px 6px;
+  background: var(--bg-2);
+  border-radius: 3px;
+}
+
+/* ── Velocity Grid ──────────────────────────────────────────────────── */
+
+.velocity-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.velocity-card {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  position: relative;
+  transition: border-color 0.2s;
+}
+
+.velocity-card.has-prediction {
+  border-color: rgba(139, 92, 246, 0.4);
+}
+
+.velocity-service {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-0);
+  margin-bottom: 6px;
+}
+
+.velocity-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.velocity-arrow {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.velocity-arrow.vel-up {
+  color: var(--err);
+}
+
+.velocity-arrow.vel-down {
+  color: var(--ok);
+}
+
+.velocity-arrow.vel-stable {
+  color: var(--text-2);
+}
+
+.velocity-value {
+  font-size: 11px;
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--text-1);
+}
+
+.velocity-score {
+  font-size: 11px;
+  color: var(--text-2);
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.velocity-warning-dot {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--violet);
+  animation: blink 1.5s step-end infinite;
 }

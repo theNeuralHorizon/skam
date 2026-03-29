@@ -1,4 +1,4 @@
-export default function EventLog({ events, engine }) {
+export default function EventLog({ events, engine, wsConnected }) {
     const cooldowns = engine?.services_in_cooldown || []
 
     function getHealingTime(evt) {
@@ -84,6 +84,10 @@ export default function EventLog({ events, engine }) {
                 <div className="card-header">
                     <div className="card-title">Recovery Events</div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <span className="ws-status">
+                            <span className={`ws-dot ${wsConnected ? 'connected' : 'disconnected'}`} />
+                            {wsConnected ? 'Live' : 'Reconnecting'}
+                        </span>
                         <button className="sel" onClick={downloadLogs}
                             style={{ cursor: 'pointer', fontSize: 11, padding: '4px 10px' }}
                             title="Download events as JSON">

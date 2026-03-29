@@ -40,5 +40,40 @@
     "latency",
     "cpu_usage",
     "memory_usage"
-  ]
+  ],
+  "retrained_on": "own-cluster-data",
+  "retrain_dataset": "C:\\Users\\kshit\\OneDrive\\Desktop\\skam\\ml\\data\\own-logs\\training_data.csv",
+  "retrain_stats": {
+    "xgboost": {
+      "auc_roc": 0.8703,
+      "f1": 0.4421,
+      "precision": 0.375,
+      "recall": 0.5385
+    },
+    "attention": {
+      "best_val_loss": 0.1683,
+      "sequences": 2766
+    },
+    "ocsvm": {
+      "training_samples": 2000,
+      "self_check_pct": 5.15
+    }
+  },
+  "xgboost_lstm_fusion": {
+    "val_f1": 0.2372,
+    "val_auc_roc": 0.7105,
+    "optimal_threshold": 0.6,
+    "joint_dim": 39,
+    "fusion_params": 5377,
+    "trained_on": "own-cluster-data"
+  },
+  "xgboost_lstm_ensemble": {
+    "type": "xgboost_meta_learner_with_pca",
+    "val_auc_roc": 0.9815,
+    "val_f1": 0.9041,
+    "optimal_threshold": 0.45000000000000007,
+    "compact_dim": 11,
+    "pca_variance_retained": 0.999,
+    "trained_on": "own-cluster-data"
+  }
 }

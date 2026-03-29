@@ -42,13 +42,14 @@ SERVICES = [
     "notification-service",
 ]
 
-# Same PromQL queries used by the anomaly detector collector
+# PromQL queries — use sum() to aggregate across all labels (paths, methods, pods)
+# so we get one value per service per timestamp, not per-path fragments
 QUERIES = {
-    "request_rate": 'rate(http_requests_total{{app="{service}"}}[1m])',
-    "error_rate": 'rate(http_requests_total{{app="{service}",status=~"5.."}}[1m])',
-    "p99_latency": 'histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{{app="{service}"}}[1m]))',
-    "cpu_usage": 'rate(container_cpu_usage_seconds_total{{pod=~"{service}.*"}}[1m])',
-    "memory_usage": 'container_memory_usage_bytes{{pod=~"{service}.*"}}',
+    "request_rate": 'sum(rate(http_requests_total{{app="{service}"}}[1m]))',
+    "error_rate": 'sum(rate(http_requests_total{{app="{service}",status=~"5.."}}[1m]))',
+    "p99_latency": 'histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{{app="{service}"}}[1m])) by (le))',
+    "cpu_usage": 'sum(rate(container_cpu_usage_seconds_total{{pod=~"{service}.*",container!=""}}[1m]))',
+    "memory_usage": 'sum(container_memory_usage_bytes{{pod=~"{service}.*",container!=""}})',
 }
 
 

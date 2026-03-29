@@ -17,7 +17,7 @@ const MODELS = [
     { key: 'if_lstm_combined', label: 'IF+LSTM (Prod)', color: '#8b5cf6' },
     { key: 'xgboost_lstm', label: 'XGBoost+LSTM', color: '#10b981' },
     { key: 'xgboost_attention', label: 'XGBoost+Attn', color: '#f59e0b' },
-    { key: 'ocsvm', label: 'One-Class SVM', color: '#f43f5e' },
+    { key: 'xgboost_meta', label: 'XGBoost Meta', color: '#f43f5e' },
 ]
 
 const MAX_POINTS = 60
@@ -302,9 +302,9 @@ export default function AnomalyTimeline({ scores }) {
                                 </div>
                                 <div>
                                     <div className="metric-val" style={{ fontSize: 14, color: '#f39c12' }}>
-                                        {(ens.ocsvm ?? 0).toFixed(3)}
+                                        {(ens.xgboost_meta ?? 0).toFixed(3)}
                                     </div>
-                                    <div className="metric-lbl">SVM</div>
+                                    <div className="metric-lbl">META</div>
                                 </div>
                             </div>
                         </div>

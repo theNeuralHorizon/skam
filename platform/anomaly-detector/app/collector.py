@@ -77,6 +77,10 @@ class MetricsCollector:
             f'container_memory_usage_bytes{{pod=~"{service}.*"}}'
         )
 
+        memory_limit = await self._instant_query(
+            f'container_spec_memory_limit_bytes{{pod=~"{service}.*"}}'
+        )
+
         return ServiceMetrics(
             service=service,
             timestamp=now,
@@ -85,6 +89,7 @@ class MetricsCollector:
             p99_latency=max(p99_latency, 0.0),
             cpu_usage=max(cpu_usage, 0.0),
             memory_usage=max(memory_usage, 0.0),
+            memory_limit=max(memory_limit, 0.0),
         )
 
     async def collect_all_services(self) -> list[ServiceMetrics]:
@@ -118,7 +123,7 @@ class MetricsCollector:
             resp.raise_for_status()
             return self._extract_value(resp.json())
         except Exception:
-            logger.debug("metrics_collector.query_failed", query=promql, exc_info=True)
+            logger.warning("metrics_collector.query_failed", query=promql, exc_info=True)
             return 0.0
 
     @staticmethod
@@ -132,7 +137,7 @@ class MetricsCollector:
             value_str = result[0]["value"][1]
             value = float(value_str)
             # Prometheus may return NaN/Inf for edge cases
-            if value != value:  # NaN check
+            if value != value or value == float("inf") or value == float("-inf"):
                 return 0.0
             return value
         except (KeyError, IndexError, TypeError, ValueError):

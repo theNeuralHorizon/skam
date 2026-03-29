@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
@@ -18,6 +18,7 @@ class ServiceMetrics(BaseModel):
     p99_latency: float = Field(default=0.0, ge=0.0, description="99th-percentile latency in seconds")
     cpu_usage: float = Field(default=0.0, ge=0.0, description="CPU core-seconds per second")
     memory_usage: float = Field(default=0.0, ge=0.0, description="Memory usage in bytes")
+    memory_limit: float = Field(default=0.0, ge=0.0, description="Memory limit in bytes (0 if unknown)")
 
     def feature_vector(self) -> list[float]:
         """Return the 5-element feature vector used by detectors."""
@@ -75,7 +76,7 @@ class PerEnsembleScores(BaseModel):
     if_lstm_combined: float = Field(default=0.0, ge=0.0, le=1.0)
     xgboost_lstm: float = Field(default=0.0, ge=0.0, le=1.0)
     xgboost_attention: float = Field(default=0.0, ge=0.0, le=1.0)
-    ocsvm: float = Field(default=0.0, ge=0.0, le=1.0)
+    xgboost_meta: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
 class ServiceScore(BaseModel):
@@ -91,6 +92,7 @@ class ServiceScore(BaseModel):
     severity_level: int = 0
     consecutive_windows: int = 0
     score_velocity: float = 0.0
+    prediction: Optional[dict[str, Any]] = None
     per_ensemble: PerEnsembleScores = Field(default_factory=PerEnsembleScores)
 
 
@@ -99,3 +101,42 @@ class ScoresResponse(BaseModel):
 
     scores: list[ServiceScore] = Field(default_factory=list)
     threshold: float = 0.7
+
+
+# ── Prediction models ─────────────────────────────────────────────────
+
+
+class PredictionResult(BaseModel):
+    """Output of a prediction algorithm for a single service."""
+
+    service: str
+    prediction_type: str  # "score_trajectory", "capacity_exhaustion", "repeat_failure"
+    predicted_event: str  # "threshold_breach", "oom_kill", "recurring_anomaly"
+    time_to_event_seconds: float = Field(ge=0.0)
+    confidence: float = Field(ge=0.0, le=1.0)
+    current_value: float
+    predicted_value: float
+    threshold: float
+    recommended_action: Optional[str] = None
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class PredictionAlert(BaseModel):
+    """Alert sent to the decision engine for preemptive recovery."""
+
+    service: str
+    prediction_type: str
+    predicted_event: str
+    time_to_event_seconds: float
+    confidence: float
+    current_score: float
+    recommended_action: Optional[str] = None
+    timestamp: datetime
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class PredictionsResponse(BaseModel):
+    """Response format for /anomaly/api/predictions."""
+
+    predictions: list[PredictionResult] = Field(default_factory=list)
+    generated_at: datetime

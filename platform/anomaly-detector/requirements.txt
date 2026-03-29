@@ -6,7 +6,6 @@ structlog==24.4.0
 pydantic==2.10.4
 httpx==0.28.1
 scikit-learn==1.6.1
-torch==2.5.1
 xgboost==2.1.0
 joblib==1.4.2
 numpy==2.2.1
