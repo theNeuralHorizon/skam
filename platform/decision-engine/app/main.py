@@ -23,7 +23,7 @@ from app.metrics import (
     recovery_actions_total,
     recovery_duration_seconds,
 )
-from app.models import AnomalyAlert, RecoveryAction, SystemStatus
+from app.models import AnomalyAlert, PredictionAlert, RecoveryAction, SystemStatus
 from app.policies import PolicyEngine
 from app.validator import RecoveryValidator
 
@@ -66,8 +66,12 @@ event_manager: EventManager = EventManager()
 
 # Bounded history of recent actions (latest 200)
 recent_actions: deque[RecoveryAction] = deque(maxlen=200)
+# Bounded history of recent predictions (latest 100)
+recent_predictions: deque[dict] = deque(maxlen=100)
 # Set of services currently being healed (prevents duplicate concurrent healing)
 active_action_ids: set[str] = set()
+_state_lock = asyncio.Lock()
+_recovery_tasks: set[asyncio.Task] = set()
 
 _health_task: asyncio.Task | None = None
 
@@ -146,6 +150,17 @@ async def lifespan(app: FastAPI):  # noqa: ANN201
             await _health_task
         except asyncio.CancelledError:
             pass
+
+    # Wait for in-flight recovery actions to complete (up to 10s)
+    if _recovery_tasks:
+        logger.info("shutdown.waiting_for_recoveries", count=len(_recovery_tasks))
+        done, pending = await asyncio.wait(_recovery_tasks, timeout=10.0)
+        if pending:
+            logger.warning("shutdown.cancelling_stale_recoveries", count=len(pending))
+            for t in pending:
+                t.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+
     logger.info("shutdown_complete")
 
 
@@ -240,8 +255,10 @@ async def receive_alert(alert: AnomalyAlert):
     if action is None:
         return {"status": "no_action", "reason": "no matching policy or cooldown active"}
 
-    # Fire-and-forget the recovery pipeline
-    asyncio.create_task(_execute_recovery(action))
+    # Track the recovery task for graceful shutdown
+    task = asyncio.create_task(_execute_recovery(action))
+    _recovery_tasks.add(task)
+    task.add_done_callback(_recovery_tasks.discard)
 
     return {
         "status": "accepted",
@@ -249,6 +266,59 @@ async def receive_alert(alert: AnomalyAlert):
         "action_type": action.action_type,
         "target_service": action.target_service,
     }
+
+
+# ---------------------------------------------------------------------------
+# Prediction alert ingestion
+# ---------------------------------------------------------------------------
+
+@app.post("/prediction-alerts")
+async def receive_prediction_alert(alert: PredictionAlert):
+    """Receive a prediction alert, evaluate preemptive policies, and optionally act."""
+    logger.info(
+        "prediction_alert_received",
+        service=alert.service,
+        prediction_type=alert.prediction_type,
+        confidence=alert.confidence,
+        time_to_event=alert.time_to_event_seconds,
+    )
+
+    # Store and broadcast
+    recent_predictions.append(alert.model_dump(mode="json"))
+    await event_manager.emit_prediction_raised(alert.model_dump(mode="json"))
+
+    if policy_engine is None:
+        return {"status": "rejected", "reason": "engine not initialised"}
+
+    action = policy_engine.evaluate_prediction(alert)
+    if action is None:
+        return {
+            "status": "prediction_noted",
+            "reason": "no preemptive action triggered (cooldown or below confidence threshold)",
+        }
+
+    # Fire-and-forget the preemptive recovery pipeline
+    asyncio.create_task(_execute_recovery(action))
+
+    return {
+        "status": "preemptive_action",
+        "action_id": action.id,
+        "action_type": action.action_type,
+        "target_service": action.target_service,
+        "prediction_type": alert.prediction_type,
+    }
+
+
+@app.get("/predictions")
+async def list_predictions(limit: int = 50):
+    """Return recent prediction alerts."""
+    return list(recent_predictions)[-limit:]
+
+
+@app.get("/decision/api/predictions")
+async def list_predictions_dashboard(limit: int = 50):
+    """Return predictions in dashboard-compatible format."""
+    return {"predictions": list(recent_predictions)[-limit:]}
 
 
 # ---------------------------------------------------------------------------
@@ -264,9 +334,10 @@ async def _execute_recovery(action: RecoveryAction) -> None:
     )
 
     action.status = "executing"
-    active_action_ids.add(action.id)
+    async with _state_lock:
+        active_action_ids.add(action.id)
+        recent_actions.append(action)
     active_recoveries.inc()
-    recent_actions.append(action)
     start = time.monotonic()
 
     await event_manager.emit_recovery_started(action.model_dump(mode="json"))
@@ -330,7 +401,8 @@ async def _execute_recovery(action: RecoveryAction) -> None:
     finally:
         duration = time.monotonic() - start
         recovery_duration_seconds.labels(action_type=action.action_type).observe(duration)
-        active_action_ids.discard(action.id)
+        async with _state_lock:
+            active_action_ids.discard(action.id)
         active_recoveries.dec()
         log.info("recovery_completed", duration_seconds=round(duration, 2), status=action.status)
 

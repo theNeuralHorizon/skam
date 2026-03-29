@@ -10,7 +10,7 @@ from typing import Optional
 import structlog
 
 from app.metrics import policy_evaluations_total
-from app.models import AnomalyAlert, HealingPolicy, RecoveryAction
+from app.models import AnomalyAlert, HealingPolicy, PredictionAlert, RecoveryAction
 
 logger = structlog.get_logger(__name__)
 
@@ -69,11 +69,43 @@ DEFAULT_POLICIES: list[HealingPolicy] = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Preemptive policies for predictions (conservative actions, longer cooldowns)
+# ---------------------------------------------------------------------------
+PREEMPTIVE_POLICIES: list[dict] = [
+    {
+        "name": "predicted-oom-scale",
+        "prediction_type": "capacity_exhaustion",
+        "min_confidence": 0.6,
+        "action_type": "increase_resources",
+        "parameters": {"cpu": "500m", "memory": "1Gi"},
+        "cooldown_seconds": 300,
+    },
+    {
+        "name": "predicted-trajectory-breach",
+        "prediction_type": "score_trajectory",
+        "min_confidence": 0.7,
+        "action_type": "scale_up",
+        "parameters": {"replicas_add": 1},
+        "cooldown_seconds": 240,
+    },
+    {
+        "name": "predicted-repeat-failure",
+        "prediction_type": "repeat_failure",
+        "min_confidence": 0.5,
+        "action_type": "increase_resources",
+        "parameters": {"cpu": "750m", "memory": "768Mi"},
+        "cooldown_seconds": 300,
+    },
+]
+
+
 class PolicyEngine:
     """Evaluates anomaly alerts against healing policies and produces recovery actions."""
 
     def __init__(self, policies: list[HealingPolicy] | None = None) -> None:
         self.policies: list[HealingPolicy] = list(policies or DEFAULT_POLICIES)
+        self.preemptive_policies: list[dict] = list(PREEMPTIVE_POLICIES)
         # Cooldown tracker:  key = (service, action_type) → last execution epoch
         self._cooldowns: dict[tuple[str, str], float] = {}
 
@@ -154,6 +186,73 @@ class PolicyEngine:
         if removed:
             logger.info("policy_removed", policy=name)
         return removed
+
+    def evaluate_prediction(self, prediction: PredictionAlert) -> Optional[RecoveryAction]:
+        """Evaluate a prediction alert against preemptive policies.
+
+        Uses a separate cooldown namespace (``preemptive_``) to avoid
+        interfering with reactive cooldowns.
+        """
+        for policy in self.preemptive_policies:
+            if policy["prediction_type"] != prediction.prediction_type:
+                continue
+            if prediction.confidence < policy["min_confidence"]:
+                continue
+
+            cooldown_key = (f"preemptive_{prediction.service}", policy["action_type"])
+            if self._in_cooldown(cooldown_key, policy["cooldown_seconds"]):
+                logger.info(
+                    "preemptive_cooldown_active",
+                    policy=policy["name"],
+                    service=prediction.service,
+                )
+                policy_evaluations_total.labels(
+                    policy_name=policy["name"], result="cooldown"
+                ).inc()
+                continue
+
+            self._cooldowns[cooldown_key] = time.time()
+
+            # Create a synthetic alert so the recovery action has the expected shape
+            synthetic_alert = AnomalyAlert(
+                service=prediction.service,
+                anomaly_type=prediction.prediction_type,
+                severity=prediction.confidence,
+                combined_score=prediction.current_score,
+                timestamp=prediction.timestamp,
+                metrics=prediction.details,
+            )
+
+            action = RecoveryAction(
+                id=str(uuid.uuid4()),
+                alert=synthetic_alert,
+                action_type=policy["action_type"],
+                target_service=prediction.service,
+                parameters=dict(policy["parameters"]),
+                status="pending",
+                started_at=datetime.now(timezone.utc),
+            )
+
+            logger.info(
+                "preemptive_policy_matched",
+                policy=policy["name"],
+                service=prediction.service,
+                action_type=policy["action_type"],
+                confidence=prediction.confidence,
+                action_id=action.id,
+            )
+            policy_evaluations_total.labels(
+                policy_name=policy["name"], result="matched"
+            ).inc()
+            return action
+
+        logger.debug(
+            "no_preemptive_policy_matched",
+            service=prediction.service,
+            prediction_type=prediction.prediction_type,
+            confidence=prediction.confidence,
+        )
+        return None
 
     # ------------------------------------------------------------------
     # Internal helpers
