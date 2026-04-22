@@ -5,6 +5,7 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+.pytest_cache/
 
 # Go
 vendor/
@@ -12,25 +13,41 @@ vendor/
 # Node
 node_modules/
 dashboard/dist/
+dashboard/.vite/
+npm-debug.log*
+yarn-debug.log*
 
 # ML raw data (large downloads, not committed)
 ml/data/
 
-# ML models - allow pre-trained weights (small, needed for startup)
+# ML models — allow pre-trained weights (small, needed for startup)
 # Re-add specific ignores for large experiment artefacts if needed
 
 # IDE
 .vscode/
 .idea/
 *.swp
+.claude/
 
 # OS
 .DS_Store
 Thumbs.db
 
-# K8s
+# K8s / secrets
 *.kubeconfig
+k8s/microservices/secrets.yaml
+k8s/**/secrets.yaml
 
 # Env
 .env
 .env.local
+.env.*.local
+
+# Graphify cache
+graphify-out/
+.graphifyignore
+
+# Accidental shell artifacts
+services$*
+services/*;C/
+*;C/
