@@ -22,7 +22,8 @@ spec:
     spec:
       containers:
         - name: product-service
-          image: localhost:5111/skam/product-service:latest
+          image: skam-registry:5111/skam/product-service:latest
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8082
               name: http

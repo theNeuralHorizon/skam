@@ -45,6 +45,20 @@ class HealingPolicy(BaseModel):
     max_retries: int = 2
 
 
+class PredictionAlert(BaseModel):
+    """Incoming prediction alert from the anomaly-detector for preemptive recovery."""
+
+    service: str
+    prediction_type: str  # "score_trajectory", "capacity_exhaustion", "repeat_failure"
+    predicted_event: str  # "threshold_breach", "oom_kill", "recurring_anomaly"
+    time_to_event_seconds: float
+    confidence: float = Field(ge=0.0, le=1.0)
+    current_score: float
+    recommended_action: Optional[str] = None
+    timestamp: datetime
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
 class SystemStatus(BaseModel):
     """Overall system status snapshot."""
 

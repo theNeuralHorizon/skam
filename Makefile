@@ -42,6 +42,10 @@ copy-models:
 		cp ml/models/isolation_forest.pkl platform/anomaly-detector/models/; \
 		cp ml/models/lstm_autoencoder.pt platform/anomaly-detector/models/; \
 		cp ml/models/training_stats.json platform/anomaly-detector/models/; \
+		cp -f ml/models/xgboost_lstm.pkl platform/anomaly-detector/models/ 2>/dev/null || true; \
+		cp -f ml/models/xgboost_attention.pkl platform/anomaly-detector/models/ 2>/dev/null || true; \
+		cp -f ml/models/attention_net.pt platform/anomaly-detector/models/ 2>/dev/null || true; \
+		cp -f ml/models/ocsvm.pkl platform/anomaly-detector/models/ 2>/dev/null || true; \
 		echo "Pre-trained models copied to anomaly-detector build context"; \
 	else \
 		echo "WARNING: No pre-trained models found in ml/models/. Run 'python ml/training/train_models.py' first."; \

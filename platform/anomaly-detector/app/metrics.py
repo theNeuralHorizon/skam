@@ -37,3 +37,18 @@ model_training_samples = Gauge(
     "Number of samples available for training a detector stage",
     ["detector"],
 )
+
+# ---------------------------------------------------------------------------
+# Prediction metrics
+# ---------------------------------------------------------------------------
+prediction_generated_total = Counter(
+    "prediction_generated_total",
+    "Total predictions generated, partitioned by service and prediction type",
+    ["service", "prediction_type"],
+)
+
+anomaly_score_velocity = Gauge(
+    "anomaly_score_velocity",
+    "EMA-smoothed rate of change of the ensemble anomaly score",
+    ["service"],
+)

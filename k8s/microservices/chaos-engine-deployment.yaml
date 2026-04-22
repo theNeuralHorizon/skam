@@ -24,7 +24,8 @@ spec:
       serviceAccountName: skam-platform-sa
       containers:
         - name: chaos-engine
-          image: skam/chaos-engine:latest
+          image: skam-registry:5111/skam/chaos-engine:latest
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8090
               name: http

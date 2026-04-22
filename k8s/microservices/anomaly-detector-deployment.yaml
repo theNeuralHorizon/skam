@@ -21,9 +21,18 @@ spec:
         prometheus.io/port: "8091"
         prometheus.io/path: "/metrics"
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 2000
       containers:
         - name: anomaly-detector
-          image: localhost:5111/skam/anomaly-detector:latest
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          image: skam-registry:5111/skam/anomaly-detector:latest
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8091
               name: http
@@ -40,13 +49,21 @@ spec:
               value: "/app/models/isolation_forest.pkl"
             - name: LSTM_MODEL_PATH
               value: "/app/models/lstm_autoencoder.pt"
+            - name: XGBOOST_LSTM_MODEL_PATH
+              value: "/app/models/xgboost_lstm.pkl"
+            - name: XGBOOST_ATTENTION_MODEL_PATH
+              value: "/app/models/xgboost_attention.pkl"
+            - name: ATTENTION_MODEL_PATH
+              value: "/app/models/attention_net.pt"
+            - name: OCSVM_MODEL_PATH
+              value: "/app/models/ocsvm.pkl"
           resources:
             requests:
-              memory: "256Mi"
-              cpu: "100m"
-            limits:
               memory: "512Mi"
-              cpu: "500m"
+              cpu: "200m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
           readinessProbe:
             httpGet:
               path: /ready

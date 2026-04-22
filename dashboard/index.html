@@ -2,10 +2,20 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="SKAM - Self-healing Kubernetes Autonomous Monitor Dashboard" />
-    <title>SKAM Dashboard</title>
+    <meta name="description" content="SKAM — Self-healing Kubernetes Autonomous Monitor" />
+    <meta name="theme-color" content="#05080f" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="color-scheme" content="dark" />
+
+    <!-- Note: strict CSP is delivered via nginx headers in production
+         (see dashboard/nginx.conf). We omit the CSP meta here to keep
+         Vite HMR working in dev without weakening 'script-src'. -->
+    <meta http-equiv="X-Content-Type-Options" content="nosniff" />
+    <meta http-equiv="Permissions-Policy" content="camera=(), microphone=(), geolocation=()" />
+
+    <title>SKAM — Self-Healing K8s Monitor</title>
   </head>
   <body>
     <div id="root"></div>

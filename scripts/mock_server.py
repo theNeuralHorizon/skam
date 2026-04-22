@@ -132,6 +132,15 @@ chaos_injection_times = {}         # service -> injection start timestamp
 
 SCORE_HISTORY_LEN = 10
 
+# --- Prediction Engine State ------------------------------------
+
+prediction_history = []          # resolved predictions
+active_predictions = {}          # id -> prediction dict
+prediction_id_counter = 0
+service_anomaly_history = {}     # service -> list of row_index when anomaly detected
+feature_trends = {}              # service -> deque(maxlen=10) of feature dicts
+last_prediction_tick = 0         # ensure frequent predictions for demo
+
 # --- Synthetic Data Generator (no CSV needed) ---------------------
 
 SERVICES = list(SERVICE_MAP.values())
@@ -716,6 +725,315 @@ async def create_experiment(req: ExpReq):
     return exp
 
 
+# --- Prediction Engine --------------------------------------------
+
+def predict_score_trajectory(scores):
+    """Predict future anomalies from score velocity trends."""
+    preds = []
+    for s in scores:
+        service = s["service"]
+        history = list(previous_scores.get(service, []))
+        if len(history) < 3:
+            continue
+        # Average velocity over last 3 ticks
+        deltas = [history[i] - history[i-1] for i in range(-2, 0)]
+        avg_vel = sum(deltas) / len(deltas)
+        current = history[-1]
+
+        if current >= 0.7:
+            continue  # already anomalous, not a prediction
+
+        # Extrapolate: ticks * 5s per tick
+        for ticks, eta in [(6, 30), (12, 60), (24, 120)]:
+            projected = current + avg_vel * ticks
+            if projected > 0.7 and avg_vel > 0.005:
+                confidence = min(0.95, 0.3 + abs(avg_vel) * 8 + len(history) * 0.04)
+                preds.append({
+                    "prediction_type": "score_trajectory",
+                    "predicted_event": "threshold_breach",
+                    "service": service,
+                    "confidence": round(confidence, 3),
+                    "time_to_event_seconds": eta,
+                    "recommended_action": "preemptive_scale_up",
+                    "details": {
+                        "current_score": round(current, 4),
+                        "predicted_score": round(min(1.0, projected), 4),
+                        "velocity": round(avg_vel, 6),
+                        "trend_length": len(history),
+                    },
+                })
+                break  # only report the earliest breach
+
+        # Also fire on modest upward trends for demo visibility
+        if avg_vel > 0.03 and current > 0.25 and not any(
+            p["service"] == service and p["prediction_type"] == "score_trajectory" for p in preds
+        ):
+            confidence = min(0.65, 0.2 + avg_vel * 5 + current * 0.3)
+            projected = current + avg_vel * 6
+            preds.append({
+                "prediction_type": "score_trajectory",
+                "predicted_event": "threshold_breach",
+                "service": service,
+                "confidence": round(confidence, 3),
+                "time_to_event_seconds": 60,
+                "recommended_action": "monitor_closely",
+                "details": {
+                    "current_score": round(current, 4),
+                    "predicted_score": round(min(1.0, projected), 4),
+                    "velocity": round(avg_vel, 6),
+                    "trend_length": len(history),
+                },
+            })
+    return preds
+
+
+def predict_capacity_exhaustion(scores):
+    """Predict resource exhaustion from feature trends."""
+    preds = []
+    limits = {"cpu_usage": 0.04, "memory_usage_mb": 200.0, "error_ratio": 0.25}
+
+    for s in scores:
+        service = s["service"]
+        features = s.get("features", {})
+
+        # Track feature trends
+        if service not in feature_trends:
+            feature_trends[service] = deque(maxlen=10)
+        feature_trends[service].append(features)
+
+        trend = list(feature_trends[service])
+        if len(trend) < 3:
+            continue
+
+        for resource, limit in limits.items():
+            vals = [t.get(resource, 0) for t in trend[-3:]]
+            if len(vals) < 3 or vals[-1] <= 0:
+                continue
+            rate = (vals[-1] - vals[0]) / max(len(vals) - 1, 1)
+            current = vals[-1]
+
+            if rate <= 0:
+                continue
+
+            # Time to exhaustion in ticks (each tick = 5s)
+            remaining = limit - current
+            if remaining <= 0:
+                continue
+            ticks_to_exhaust = remaining / rate
+            eta = int(ticks_to_exhaust * 5)
+
+            if eta > 180:
+                continue  # too far out
+
+            proximity = current / limit
+            confidence = min(0.9, 0.15 + proximity * 0.4 + abs(rate) * 15)
+            if confidence < 0.3:
+                continue
+
+            resource_label = {"cpu_usage": "CPU", "memory_usage_mb": "Memory", "error_ratio": "Error Rate"}
+            preds.append({
+                "prediction_type": "capacity_exhaustion",
+                "predicted_event": "oom_kill" if resource == "memory_usage_mb" else "threshold_breach",
+                "service": service,
+                "confidence": round(confidence, 3),
+                "time_to_event_seconds": min(eta, 120),
+                "recommended_action": "increase_resources" if resource != "error_ratio" else "rollout_restart",
+                "details": {
+                    "resource": resource_label.get(resource, resource),
+                    "current_value": round(current, 4),
+                    "projected_value": round(min(current + rate * (eta / 5), limit * 1.2), 4),
+                    "limit": limit,
+                    "rate_per_tick": round(rate, 6),
+                },
+            })
+    return preds
+
+
+def predict_repeat_failure(scores):
+    """Predict repeat anomalies for services with failure history."""
+    preds = []
+    for s in scores:
+        service = s["service"]
+        current = s.get("ensemble_score", 0)
+        velocity = s.get("score_velocity", 0)
+
+        # Track anomaly history
+        if s.get("is_anomaly"):
+            if service not in service_anomaly_history:
+                service_anomaly_history[service] = []
+            # Don't spam - only add if last entry is different tick
+            hist = service_anomaly_history[service]
+            if not hist or hist[-1] != row_index:
+                hist.append(row_index)
+                if len(hist) > 50:
+                    service_anomaly_history[service] = hist[-50:]
+
+        hist = service_anomaly_history.get(service, [])
+        if len(hist) < 1:
+            continue
+
+        # Predict if: has history, score rising but not yet anomalous
+        if current >= 0.7 or current < 0.12:
+            continue
+        if velocity <= 0:
+            continue
+
+        ticks_since = row_index - hist[-1] if hist else 999
+        confidence = min(0.85, 0.1 + len(hist) * 0.08 + velocity * 4 + (current - 0.1) * 0.8)
+        if confidence < 0.3:
+            continue
+
+        # Estimate ETA based on velocity
+        remaining = 0.7 - current
+        eta = int((remaining / max(velocity, 0.001)) * 5) if velocity > 0 else 120
+        eta = min(max(eta, 15), 120)
+
+        preds.append({
+            "prediction_type": "repeat_failure",
+            "predicted_event": "recurring_anomaly",
+            "service": service,
+            "confidence": round(confidence, 3),
+            "time_to_event_seconds": eta,
+            "recommended_action": "preemptive_scale_up",
+            "details": {
+                "previous_anomalies": len(hist),
+                "ticks_since_last": ticks_since,
+                "current_score": round(current, 4),
+                "velocity": round(velocity, 6),
+            },
+        })
+    return preds
+
+
+def generate_predictions():
+    """Run all prediction algorithms and manage prediction lifecycle."""
+    global prediction_id_counter, last_prediction_tick
+
+    scores = make_all_scores()
+
+    # Run all three algorithms
+    all_preds = []
+    all_preds.extend(predict_score_trajectory(scores))
+    all_preds.extend(predict_capacity_exhaustion(scores))
+    all_preds.extend(predict_repeat_failure(scores))
+
+    # Deduplicate: no same service+type if already active within last 6 ticks (30s)
+    new_preds = []
+    for p in all_preds:
+        key = f"{p['service']}:{p['prediction_type']}"
+        if key in active_predictions:
+            existing = active_predictions[key]
+            if row_index - existing.get("_tick", 0) < 12:
+                continue
+        new_preds.append(p)
+
+    # Expire old active predictions
+    expired_keys = []
+    for key, pred in active_predictions.items():
+        age_ticks = row_index - pred.get("_tick", 0)
+        if age_ticks > 24:  # 120s
+            pred["status"] = "expired"
+            prediction_history.append(pred)
+            expired_keys.append(key)
+        # Check if prediction was confirmed (service actually went anomalous)
+        svc = pred.get("service", "")
+        current_score = next((s["ensemble_score"] for s in scores if s["service"] == svc), 0)
+        if current_score > 0.7 and pred.get("status") != "confirmed":
+            pred["status"] = "confirmed"
+            prediction_history.append(pred)
+            expired_keys.append(key)
+
+    for key in expired_keys:
+        active_predictions.pop(key, None)
+
+    # Register new predictions
+    for p in new_preds:
+        prediction_id_counter += 1
+        key = f"{p['service']}:{p['prediction_type']}"
+        p["id"] = f"pred-{prediction_id_counter}"
+        p["_tick"] = row_index
+        p["status"] = "active"
+        p["timestamp"] = datetime.now(timezone.utc).isoformat()
+        active_predictions[key] = p
+
+    # Guarantee at least 1 prediction every ~2 ticks (10s) for demo
+    if not new_preds and (row_index - last_prediction_tick) >= 4:
+        # Force a trajectory prediction on a random service with positive jitter
+        svc = random.choice(SERVICES)
+        history = list(previous_scores.get(svc, []))
+        current = history[-1] if history else 0.1
+        fake_vel = random.uniform(0.01, 0.04)
+        prediction_id_counter += 1
+        forced = {
+            "id": f"pred-{prediction_id_counter}",
+            "prediction_type": "score_trajectory",
+            "predicted_event": "threshold_breach",
+            "service": svc,
+            "confidence": round(random.uniform(0.35, 0.55), 3),
+            "time_to_event_seconds": random.choice([60, 90, 120]),
+            "recommended_action": "monitor_closely",
+            "details": {
+                "current_score": round(current, 4),
+                "predicted_score": round(min(1.0, current + fake_vel * 12), 4),
+                "velocity": round(fake_vel, 6),
+                "trend_length": len(history),
+            },
+            "_tick": row_index,
+            "status": "active",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        key = f"{svc}:score_trajectory"
+        active_predictions[key] = forced
+        new_preds.append(forced)
+
+    if new_preds:
+        last_prediction_tick = row_index
+
+    # Keep history bounded
+    if len(prediction_history) > 200:
+        prediction_history[:] = prediction_history[-100:]
+
+    return new_preds
+
+
+async def generate_and_broadcast_predictions():
+    """Generate predictions and broadcast high-confidence ones via WebSocket."""
+    new_preds = generate_predictions()
+    for p in new_preds:
+        if p.get("confidence", 0) >= 0.4:
+            evt = {
+                "type": "prediction_raised",
+                "data": {k: v for k, v in p.items() if not k.startswith("_")},
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            await broadcast(evt)
+
+
+# --- Prediction Endpoint -----------------------------------------
+
+@app.get("/anomaly/api/predictions")
+async def get_predictions():
+    """Return active predictions and history for the dashboard."""
+    active = [
+        {k: v for k, v in p.items() if not k.startswith("_")}
+        for p in active_predictions.values()
+    ]
+    history = [
+        {k: v for k, v in p.items() if not k.startswith("_")}
+        for p in prediction_history[-50:]
+    ]
+    return {
+        "predictions": active,
+        "history": history,
+        "stats": {
+            "total_generated": prediction_id_counter,
+            "currently_active": len(active_predictions),
+            "confirmed": sum(1 for p in prediction_history if p.get("status") == "confirmed"),
+            "false_positives": sum(1 for p in prediction_history if p.get("status") == "false_positive"),
+        },
+    }
+
+
 # --- Background Tasks ---------------------------------------------
 
 async def advance_replay():
@@ -734,6 +1052,12 @@ async def advance_replay():
         for s in expired:
             anomaly_overrides.pop(s, None)
             chaos_injection_times.pop(s, None)
+
+        # Generate and broadcast predictions
+        try:
+            await generate_and_broadcast_predictions()
+        except Exception as e:
+            print(f"[warn] prediction error: {e}")
 
 async def auto_recovery_events():
     """Generate recovery events when anomalies are detected in the data."""
@@ -807,4 +1131,5 @@ app.router.lifespan_context = lifespan
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=9000)
+    port = int(os.environ.get("MOCK_PORT", 9000))
+    uvicorn.run(app, host="0.0.0.0", port=port)

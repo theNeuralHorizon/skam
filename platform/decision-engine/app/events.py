@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import structlog
@@ -50,7 +50,7 @@ class EventManager:
         if not self._connections:
             return
 
-        event.setdefault("timestamp", datetime.utcnow().isoformat())
+        event.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
 
         payload = json.dumps(event, default=str)
         stale: list[WebSocket] = []
@@ -83,3 +83,6 @@ class EventManager:
 
     async def emit_recovery_failed(self, action_data: dict[str, Any]) -> None:
         await self.broadcast({"type": "recovery_failed", "data": action_data})
+
+    async def emit_prediction_raised(self, prediction_data: dict[str, Any]) -> None:
+        await self.broadcast({"type": "prediction_raised", "data": prediction_data})
