@@ -11,6 +11,7 @@ import {
   resolveApiBase,
   buildWsUrl,
   parseWsMessage,
+  isTypedEnvelope,
   safeArr,
   safeObj,
   safeNum,
@@ -117,12 +118,17 @@ function App() {
     const connect = () => {
       ws = new WebSocket(buildWsUrl('/decision/ws/events'))
       ws.onmessage = (e) => {
-        const evt = parseWsMessage(e.data)
-        if (!evt) return
-        setEvents((prev) => [evt, ...prev].slice(0, 200))
-        if (evt.type === 'prediction_raised' && evt.data) {
-          setPredictions((prev) => [evt.data, ...prev].slice(0, 100))
+        const msg = parseWsMessage(e.data)
+        if (!msg) return
+        // Typed envelopes (e.g. prediction_raised) carry the real payload
+        // under `data`. Everything else is a flat recovery event.
+        if (isTypedEnvelope(msg)) {
+          if (msg.type === 'prediction_raised') {
+            setPredictions((prev) => [msg.data, ...prev].slice(0, 100))
+          }
+          return
         }
+        setEvents((prev) => [msg, ...prev].slice(0, 200))
       }
       ws.onopen = () => {
         setWsConnected(true)

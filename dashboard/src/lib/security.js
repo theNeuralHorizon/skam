@@ -64,22 +64,26 @@ export function safeObj(v) {
 
 /**
  * Parse a WS message safely. Returns null on anything malformed.
- * Caller should never pass the raw string to render.
+ * Preserves the original payload shape (flat recovery events and
+ * wrapped prediction events both pass through untouched after size +
+ * type checks) so downstream renderers can read fields directly.
+ * Caller should still sanitize individual strings before rendering.
  */
 export function parseWsMessage(raw) {
   if (typeof raw !== 'string') return null
   if (raw.length > 64 * 1024) return null
   try {
     const msg = JSON.parse(raw)
-    if (!msg || typeof msg !== 'object') return null
-    return {
-      type: safeStr(msg.type, 64),
-      data: safeObj(msg.data),
-      ts: safeStr(msg.ts, 64),
-    }
+    if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return null
+    return msg
   } catch {
     return null
   }
+}
+
+/** True if the message is a typed wrapper envelope (e.g. prediction_raised). */
+export function isTypedEnvelope(msg) {
+  return !!(msg && typeof msg === 'object' && typeof msg.type === 'string' && msg.data && typeof msg.data === 'object')
 }
 
 /** Validates a path used against our proxy — rejects absolute / protocol URLs. */
