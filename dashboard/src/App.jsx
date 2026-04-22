@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import './App.css'
 import ServiceTopology from './components/ServiceTopology'
 import AnomalyTimeline from './components/AnomalyTimeline'
@@ -7,67 +7,89 @@ import LiveMetrics from './components/LiveMetrics'
 import EventLog from './components/EventLog'
 import PredictionDashboard from './components/PredictionDashboard'
 import ErrorBoundary from './components/ErrorBoundary'
+import {
+  resolveApiBase,
+  buildWsUrl,
+  parseWsMessage,
+  safeArr,
+  safeObj,
+  safeNum,
+} from './lib/security'
 
-const API = import.meta.env.VITE_API_BASE || ''
+const API = resolveApiBase()
 
-const TABS = [
-  { id: 'topology', label: 'Topology' },
-  { id: 'timeline', label: 'Timeline' },
-  { id: 'chaos', label: 'Chaos' },
-  { id: 'metrics', label: 'Metrics' },
-  { id: 'events', label: 'Events' },
+const NAV = [
+  { id: 'topology', label: 'Topology', group: 'Operate', icon: TopologyIcon },
+  { id: 'timeline', label: 'Timeline', group: 'Operate', icon: TimelineIcon },
+  { id: 'metrics', label: 'Metrics', group: 'Operate', icon: MetricsIcon },
+  { id: 'events', label: 'Events', group: 'Operate', icon: EventsIcon },
+  { id: 'chaos', label: 'Chaos Lab', group: 'Experiment', icon: ChaosIcon },
 ]
+
+const FETCH_TIMEOUT_MS = 8000
+
+async function safeFetch(input, init = {}) {
+  const ctrl = new AbortController()
+  const t = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS)
+  try {
+    const res = await fetch(input, {
+      ...init,
+      signal: ctrl.signal,
+      credentials: 'same-origin',
+      redirect: 'error',
+      referrerPolicy: 'no-referrer',
+    })
+    if (!res.ok) return null
+    const ct = res.headers.get('content-type') || ''
+    if (!ct.includes('application/json')) return null
+    return await res.json()
+  } catch {
+    return null
+  } finally {
+    clearTimeout(t)
+  }
+}
 
 function App() {
   const [scores, setScores] = useState([])
   const [events, setEvents] = useState([])
   const [detectorStatus, setDetectorStatus] = useState(null)
   const [engineStatus, setEngineStatus] = useState(null)
-  const [tab, setTab] = useState('topology')
+  const [active, setActive] = useState('topology')
   const [predictionMode, setPredictionMode] = useState(false)
   const [predictions, setPredictions] = useState([])
   const [backendConnected, setBackendConnected] = useState(true)
   const [wsConnected, setWsConnected] = useState(false)
   const [lastUpdated, setLastUpdated] = useState(null)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
   const wsRef = useRef(null)
   const failCountRef = useRef(0)
 
   const fetchScores = useCallback(async () => {
-    try {
-      const r = await fetch(`${API}/anomaly/api/scores`)
-      if (!r.ok) return
-      const d = await r.json()
-      setScores(d.scores || [])
-      setBackendConnected(true)
-      setLastUpdated(new Date())
-      failCountRef.current = 0
-    } catch (_) {
-      // Only show disconnected after 2 consecutive failures to avoid flicker
+    const data = await safeFetch(`${API}/anomaly/api/scores`)
+    if (!data) {
       failCountRef.current += 1
-      if (failCountRef.current >= 2) {
-        setBackendConnected(false)
-      }
+      if (failCountRef.current >= 2) setBackendConnected(false)
+      return
     }
+    setScores(safeArr(data.scores))
+    setBackendConnected(true)
+    setLastUpdated(new Date())
+    failCountRef.current = 0
   }, [])
 
   const fetchStatus = useCallback(async () => {
-    try {
-      const [det, eng] = await Promise.allSettled([
-        fetch(`${API}/anomaly/api/status`).then(r => r.json()),
-        fetch(`${API}/decision/api/status`).then(r => r.json()),
-      ])
-      if (det.status === 'fulfilled') setDetectorStatus(det.value)
-      if (eng.status === 'fulfilled') setEngineStatus(eng.value)
-    } catch (_) { }
+    const [det, eng] = await Promise.all([
+      safeFetch(`${API}/anomaly/api/status`),
+      safeFetch(`${API}/decision/api/status`),
+    ])
+    if (det) setDetectorStatus(safeObj(det))
+    if (eng) setEngineStatus(safeObj(eng))
   }, [])
 
   const fetchPredictions = useCallback(async () => {
-    try {
-      const r = await fetch(`${API}/anomaly/api/predictions`)
-      if (!r.ok) return
-      const d = await r.json()
-      setPredictions(d.predictions || [])
-    } catch (_) { }
+    const data = await safeFetch(`${API}/anomaly/api/predictions`)
+    if (data) setPredictions(safeArr(data.predictions))
   }, [])
 
   useEffect(() => {
@@ -75,10 +97,12 @@ function App() {
     fetchStatus()
     const a = setInterval(fetchScores, 5000)
     const b = setInterval(fetchStatus, 10000)
-    return () => { clearInterval(a); clearInterval(b) }
+    return () => {
+      clearInterval(a)
+      clearInterval(b)
+    }
   }, [fetchScores, fetchStatus])
 
-  // Fetch predictions when prediction mode is active
   useEffect(() => {
     if (!predictionMode) return
     fetchPredictions()
@@ -89,58 +113,139 @@ function App() {
   useEffect(() => {
     let ws
     let timer
+    let retries = 0
     const connect = () => {
-      const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-      ws = new WebSocket(`${proto}://${location.host}/decision/ws/events`)
+      ws = new WebSocket(buildWsUrl('/decision/ws/events'))
       ws.onmessage = (e) => {
-        try {
-          const evt = JSON.parse(e.data)
-          setEvents(prev => [evt, ...prev].slice(0, 200))
-          if (evt.type === 'prediction_raised' && evt.data) {
-            setPredictions(prev => [evt.data, ...prev].slice(0, 100))
-          }
-        } catch (_) { }
+        const evt = parseWsMessage(e.data)
+        if (!evt) return
+        setEvents((prev) => [evt, ...prev].slice(0, 200))
+        if (evt.type === 'prediction_raised' && evt.data) {
+          setPredictions((prev) => [evt.data, ...prev].slice(0, 100))
+        }
       }
-      ws.onopen = () => { setWsConnected(true) }
-      ws.onclose = () => { setWsConnected(false); timer = setTimeout(connect, 3000) }
+      ws.onopen = () => {
+        setWsConnected(true)
+        retries = 0
+      }
+      ws.onclose = () => {
+        setWsConnected(false)
+        const delay = Math.min(30000, 1000 * 2 ** Math.min(retries, 5))
+        retries += 1
+        timer = setTimeout(connect, delay)
+      }
+      ws.onerror = () => {
+        try {
+          ws.close()
+        } catch {
+          // ignore
+        }
+      }
       wsRef.current = ws
     }
     connect()
-    return () => { clearTimeout(timer); ws?.close() }
+    return () => {
+      clearTimeout(timer)
+      try {
+        ws?.close()
+      } catch {
+        // ignore
+      }
+    }
   }, [])
 
-  const anomalyCount = scores.filter(s => (s.per_ensemble?.xgboost_lstm ?? s.ensemble_score ?? 0) > 0.7).length
+  const anomalyCount = useMemo(
+    () =>
+      scores.filter((s) => safeNum(s?.per_ensemble?.xgboost_lstm ?? s?.ensemble_score) > 0.7).length,
+    [scores],
+  )
   const isLoading = !lastUpdated && backendConnected
+  const activePage = NAV.find((n) => n.id === active) || NAV[0]
+  const predictionCount = predictions.filter((p) => safeNum(p.confidence) >= 0.6).length
 
   return (
-    <div className="app">
+    <div className={`app ${predictionMode ? 'no-sidebar' : ''}`}>
       {!backendConnected && (
         <div className="connection-banner disconnected">
-          Backend disconnected — data may be stale. Retrying...
+          Backend disconnected — retrying with exponential backoff…
         </div>
       )}
-      {isLoading && (
-        <div className="connection-banner loading">
-          Connecting to backend...
-        </div>
+      {isLoading && <div className="connection-banner loading">Bootstrapping dashboard…</div>}
+
+      {!predictionMode && (
+        <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`} aria-label="Primary navigation">
+          <div className="sidebar-brand">
+            <div className="logo-mark" aria-hidden="true">S</div>
+            <div className="brand-text">
+              <span className="brand-name">SKAM</span>
+              <span className="brand-sub">Self-heal · K8s</span>
+            </div>
+          </div>
+
+          {['Operate', 'Experiment'].map((group) => (
+            <div key={group} className="nav-section">
+              <div className="nav-section-label">{group}</div>
+              {NAV.filter((n) => n.group === group).map((n) => {
+                const Icon = n.icon
+                return (
+                  <button
+                    key={n.id}
+                    type="button"
+                    className={`nav-item ${active === n.id ? 'active' : ''}`}
+                    onClick={() => {
+                      setActive(n.id)
+                      setSidebarOpen(false)
+                    }}
+                    aria-current={active === n.id ? 'page' : undefined}
+                  >
+                    <Icon className="nav-icon" />
+                    {n.label}
+                  </button>
+                )
+              })}
+            </div>
+          ))}
+
+          <div className="sidebar-foot">
+            <strong>v2.0 · ocean</strong>
+            <br />
+            XGBoost+LSTM · AUC 0.98
+          </div>
+        </aside>
       )}
-      <header className="header">
+
+      <header className="header" role="banner">
         <div className="header-left">
-          <h1 className="logo">
-            <div className="logo-mark">S</div>
-            SKAM
-          </h1>
-          <span className="subtitle">Kubernetes Self-Healing Platform</span>
+          {predictionMode ? (
+            <>
+              <div className="logo-mark" style={{ width: 30, height: 30, borderRadius: 8 }}>S</div>
+              <div>
+                <div className="page-title">Prediction Mode</div>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="page-title">{activePage.label}</div>
+              <div className="page-subtitle">
+                {scores.length} services · {anomalyCount} anomalous
+              </div>
+            </>
+          )}
           {lastUpdated && (
-            <span className="last-updated" title="Last successful data fetch">
+            <span className="last-updated" title="Last successful poll">
               {lastUpdated.toLocaleTimeString('en-GB', { hour12: false })}
             </span>
           )}
+          <span className="ws-status" title={wsConnected ? 'Live stream connected' : 'Reconnecting…'}>
+            <span className={`ws-dot ${wsConnected ? 'connected' : 'disconnected'}`} />
+            {wsConnected ? 'LIVE' : 'OFFLINE'}
+          </span>
         </div>
+
         <div className="header-stats">
           <div className="stat-pill healthy">
             <span className="stat-dot" />
-            {scores.length - anomalyCount} ok
+            {Math.max(0, scores.length - anomalyCount)} ok
           </div>
           {anomalyCount > 0 && (
             <div className="stat-pill anomaly">
@@ -150,19 +255,21 @@ function App() {
           )}
           <div className="stat-pill recovery">
             <span className="stat-dot" />
-            {engineStatus?.total_recoveries || 0} recoveries
+            {safeNum(engineStatus?.total_recoveries)} recoveries
           </div>
           {predictionMode && predictions.length > 0 && (
             <div className="stat-pill prediction">
               <span className="stat-dot" />
-              {predictions.filter(p => p.confidence >= 0.6).length} prediction{predictions.filter(p => p.confidence >= 0.6).length !== 1 ? 's' : ''}
+              {predictionCount} prediction{predictionCount !== 1 ? 's' : ''}
             </div>
           )}
           <button
+            type="button"
             className={`mode-toggle ${predictionMode ? 'active' : ''}`}
-            onClick={() => setPredictionMode(m => !m)}
+            onClick={() => setPredictionMode((m) => !m)}
+            aria-pressed={predictionMode}
           >
-            {predictionMode ? 'Prediction' : 'Detection'}
+            {predictionMode ? '◉ Prediction' : '◯ Detection'}
           </button>
         </div>
       </header>
@@ -174,31 +281,65 @@ function App() {
           </ErrorBoundary>
         </main>
       ) : (
-        <>
-          <nav className="tab-bar">
-            {TABS.map(t => (
-              <button
-                key={t.id}
-                className={`tab${tab === t.id ? ' active' : ''}`}
-                onClick={() => setTab(t.id)}
-              >
-                {t.label}
-              </button>
-            ))}
-          </nav>
-
-          <main className="content">
-            <ErrorBoundary>
-              {tab === 'topology' && <ServiceTopology scores={scores} />}
-              {tab === 'timeline' && <AnomalyTimeline scores={scores} />}
-              {tab === 'chaos' && <ChaosPanel api={API} />}
-              {tab === 'metrics' && <LiveMetrics scores={scores} detector={detectorStatus} />}
-              {tab === 'events' && <EventLog events={events} engine={engineStatus} wsConnected={wsConnected} />}
-            </ErrorBoundary>
-          </main>
-        </>
+        <main className="content">
+          <ErrorBoundary>
+            {active === 'topology' && <ServiceTopology scores={scores} />}
+            {active === 'timeline' && <AnomalyTimeline scores={scores} />}
+            {active === 'chaos' && <ChaosPanel api={API} />}
+            {active === 'metrics' && <LiveMetrics scores={scores} detector={detectorStatus} />}
+            {active === 'events' && (
+              <EventLog events={events} engine={engineStatus} wsConnected={wsConnected} />
+            )}
+          </ErrorBoundary>
+        </main>
       )}
     </div>
+  )
+}
+
+/* ---------- Inline icons (no external deps, CSP-friendly) -------- */
+
+function TopologyIcon(props) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <circle cx="5" cy="6" r="2.2" />
+      <circle cx="19" cy="6" r="2.2" />
+      <circle cx="12" cy="18" r="2.2" />
+      <path d="M6.6 7.4 10.6 16.4M17.4 7.4 13.4 16.4M7 6h10" />
+    </svg>
+  )
+}
+
+function TimelineIcon(props) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <path d="M3 12h3l2-6 4 12 3-9 2 3h4" />
+    </svg>
+  )
+}
+
+function MetricsIcon(props) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <path d="M4 20V10M10 20V4M16 20v-8M22 20H2" />
+    </svg>
+  )
+}
+
+function EventsIcon(props) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <path d="M4 6h16M4 12h16M4 18h10" />
+    </svg>
+  )
+}
+
+function ChaosIcon(props) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M18.4 5.6l-2.8 2.8M8.4 15.6l-2.8 2.8" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
   )
 }
 
