@@ -8,16 +8,29 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/anomaly': {
-        target: process.env.ANOMALY_TARGET || 'http://localhost:30091',
+        target: process.env.MOCK_TARGET || 'http://localhost:9000',
         changeOrigin: true,
       },
-      '/decision': {
-        target: process.env.DECISION_TARGET || 'http://localhost:30092',
+      '/decision/ws': {
+        target: process.env.MOCK_TARGET || 'http://localhost:9000',
         changeOrigin: true,
         ws: true,
       },
+      '/decision/api': {
+        target: process.env.MOCK_TARGET || 'http://localhost:9000',
+        changeOrigin: true,
+      },
+      '/decision': {
+        target: process.env.MOCK_TARGET || 'http://localhost:9000',
+        changeOrigin: true,
+        ws: true,
+      },
+      '/chaos/api': {
+        target: process.env.MOCK_TARGET || 'http://localhost:9000',
+        changeOrigin: true,
+      },
       '/chaos': {
-        target: process.env.CHAOS_TARGET || 'http://localhost:30090',
+        target: process.env.MOCK_TARGET || 'http://localhost:9000',
         changeOrigin: true,
       },
     },
