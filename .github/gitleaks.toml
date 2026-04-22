@@ -1,0 +1,14 @@
+title = "SKAM gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Paths to exclude from secret scanning"
+paths = [
+  "dashboard/dist/",
+  "node_modules/",
+  "ml/data/",
+  "graphify-out/",
+  "\\.graphifyignore",
+]
